@@ -1,219 +1,314 @@
 import { useState, useEffect, useCallback } from 'react'
 import './App.css'
-
-interface AdStatistic {
-  play_id?: string
-  ad_filename?: string
-  device_id?: string
-  environment?: string
-  play_duration?: number
-  play_start_time?: string
-  play_end_time?: string
-  play_status?: string
-  switch_type?: string
-  bug_detected?: boolean
-  timestamp?: string
-  metadata?: {
-    interruption_time?: number
-    interruption_reason?: string
-    ad_filename?: string
-    [key: string]: any
-  }
-  [key: string]: any
-}
+import AdPlayGraph from './AdPlayGraph'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
-const TABLE_NAME = 'attentv-ad-plays-prod'
+
+interface DeviceSummary {
+  deviceId: string
+  plays24hr: number
+  plays1hr: number
+  lastPlayTime: string | null
+  lastPlayData: any
+}
+
+interface AdAggregation {
+  adFilename: string
+  totalPlays: number
+  totalDuration: number
+  averageDuration: number
+  lastPlayed: string | null
+  error?: string
+}
 
 function App() {
-  const [stats, setStats] = useState<AdStatistic[]>([])
+  const [devices, setDevices] = useState<string[]>([])
+  const [selectedDevice, setSelectedDevice] = useState<string | null>(null)
+  const [deviceSummaries, setDeviceSummaries] = useState<Record<string, DeviceSummary>>({})
+  const [adAggregations, setAdAggregations] = useState<Record<string, AdAggregation[]>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [loadingDevices, setLoadingDevices] = useState(true)
 
-  const fetchStats = useCallback(async () => {
-    if (!TABLE_NAME || TABLE_NAME === 'YOUR_TABLE_NAME_HERE') {
-      setError('Table name not configured. Please update TABLE_NAME in App.tsx')
-      return
-    }
-
-    setLoading(true)
-    setError(null)
-
+  // Fetch device list from S3
+  const fetchDevices = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/stats`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          tableName: TABLE_NAME,
-          limit: 100,
-        }),
-      })
-
+      const response = await fetch(`${API_URL}/api/devices`)
       if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.error || 'Failed to fetch statistics')
+        throw new Error('Failed to fetch devices')
       }
-
       const data = await response.json()
-      setStats(data.items || [])
+      setDevices(data.devices || [])
+      if (data.devices && data.devices.length > 0 && !selectedDevice) {
+        setSelectedDevice(data.devices[0])
+      }
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch statistics')
-      console.error('Error fetching stats:', err)
+      setError(err.message || 'Failed to fetch devices')
+      console.error('Error fetching devices:', err)
+    } finally {
+      setLoadingDevices(false)
+    }
+  }, [selectedDevice])
+
+  // Fetch device summary (24hr/1hr counts, last play)
+  const fetchDeviceSummary = useCallback(async (deviceId: string, forceRefresh = false) => {
+    try {
+      const url = `${API_URL}/api/stats/device/${deviceId}/summary${forceRefresh ? '?refresh=true' : ''}`
+      const response = await fetch(url)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch summary for ${deviceId}`)
+      }
+      const data = await response.json()
+      setDeviceSummaries(prev => ({
+        ...prev,
+        [deviceId]: data,
+      }))
+    } catch (err: any) {
+      console.error(`Error fetching summary for ${deviceId}:`, err)
+      setDeviceSummaries(prev => ({
+        ...prev,
+        [deviceId]: {
+          deviceId,
+          plays24hr: 0,
+          plays1hr: 0,
+          lastPlayTime: null,
+          lastPlayData: null,
+        },
+      }))
+    }
+  }, [])
+
+  // Fetch ad aggregations for a device
+  const fetchAdAggregations = useCallback(async (deviceId: string, forceRefresh = false) => {
+    try {
+      setLoading(true)
+      const url = `${API_URL}/api/stats/device/${deviceId}/ads${forceRefresh ? '?refresh=true' : ''}`
+      const response = await fetch(url)
+      if (!response.ok) {
+        throw new Error(`Failed to fetch ad aggregations for ${deviceId}`)
+      }
+      const data = await response.json()
+      setAdAggregations(prev => ({
+        ...prev,
+        [deviceId]: data.ads || [],
+      }))
+    } catch (err: any) {
+      console.error(`Error fetching ad aggregations for ${deviceId}:`, err)
+      setAdAggregations(prev => ({
+        ...prev,
+        [deviceId]: [],
+      }))
     } finally {
       setLoading(false)
     }
   }, [])
 
-  useEffect(() => {
-    // Auto-fetch on mount and refresh every 30 seconds
-    fetchStats()
-    const interval = setInterval(fetchStats, 30000)
-    return () => clearInterval(interval)
-  }, [fetchStats])
+  // Fetch data for selected device
+  const fetchDeviceData = useCallback(async (deviceId: string, forceRefresh = false) => {
+    await Promise.all([
+      fetchDeviceSummary(deviceId, forceRefresh),
+      fetchAdAggregations(deviceId, forceRefresh),
+    ])
+  }, [fetchDeviceSummary, fetchAdAggregations])
 
-  const formatNumber = (num: number | undefined) => {
-    if (num === undefined) return 'N/A'
-    return new Intl.NumberFormat().format(num)
-  }
+  // Manual refresh handler
+  const handleRefresh = useCallback(() => {
+    if (selectedDevice) {
+      fetchDeviceData(selectedDevice, true)
+    }
+  }, [selectedDevice, fetchDeviceData])
+
+  // Initial load
+  useEffect(() => {
+    fetchDevices()
+  }, [fetchDevices])
+
+  // Fetch data when device is selected
+  useEffect(() => {
+    if (selectedDevice) {
+      fetchDeviceData(selectedDevice)
+    }
+  }, [selectedDevice, fetchDeviceData])
 
   const formatDuration = (seconds: number | undefined) => {
-    if (seconds === undefined) return 'N/A'
-    if (seconds < 60) return `${seconds.toFixed(2)}s`
-    const mins = Math.floor(seconds / 60)
-    const secs = (seconds % 60).toFixed(2)
-    return `${mins}m ${secs}s`
+    if (seconds === undefined || seconds === 0) return '0s'
+    const hours = Math.floor(seconds / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    const secs = Math.floor(seconds % 60)
+    
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${secs}s`
+    } else if (minutes > 0) {
+      return `${minutes}m ${secs}s`
+    } else {
+      return `${secs}s`
+    }
   }
 
-  const formatDate = (dateString: string | undefined) => {
-    if (!dateString) return 'N/A'
+  const formatDate = (dateString: string | null | undefined) => {
+    if (!dateString) return 'Never'
     try {
-      return new Date(dateString).toLocaleString()
+      const date = new Date(dateString)
+      const now = new Date()
+      const diffMs = now.getTime() - date.getTime()
+      const diffMins = Math.floor(diffMs / 60000)
+      const diffHours = Math.floor(diffMs / 3600000)
+      const diffDays = Math.floor(diffMs / 86400000)
+
+      if (diffMins < 1) return 'Just now'
+      if (diffMins < 60) return `${diffMins} minute${diffMins !== 1 ? 's' : ''} ago`
+      if (diffHours < 24) return `${diffHours} hour${diffHours !== 1 ? 's' : ''} ago`
+      if (diffDays < 7) return `${diffDays} day${diffDays !== 1 ? 's' : ''} ago`
+      return date.toLocaleString()
     } catch {
       return dateString
     }
   }
 
+  // Format device name for display
+  const formatDeviceName = (deviceId: string): string => {
+    // Special mappings
+    if (deviceId === 'attntv-nuc-1') {
+      return 'The Dava'
+    }
+    if (deviceId === 'attentv-edge-3-flying-duck') {
+      return 'Flying Duck'
+    }
+    
+    // Extract part after "attentv-<number>-"
+    const match = deviceId.match(/^attentv-\d+-(.+)$/)
+    if (match) {
+      return match[1].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase())
+    }
+    
+    // Fallback to original if pattern doesn't match
+    return deviceId
+  }
+
+  const currentSummary = selectedDevice ? deviceSummaries[selectedDevice] : null
+  const currentAds = selectedDevice ? adAggregations[selectedDevice] || [] : []
+
   return (
     <div className="app">
       <header className="header">
-        <h1>Ad Play Statistics Monitor</h1>
-        <p>Monitor ad play data from AWS DynamoDB</p>
+        <h1>Ad Play Statistics Dashboard</h1>
+        <p>Monitor ad play data by device from AWS DynamoDB</p>
       </header>
 
-      <div className="controls">
-        <div className="input-group">
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', width: '100%' }}>
-            <span style={{ fontWeight: 600, color: '#333' }}>
-              Table: <code style={{ background: '#f0f0f0', padding: '0.25rem 0.5rem', borderRadius: '4px' }}>{TABLE_NAME}</code>
-            </span>
-            <button onClick={fetchStats} disabled={loading} style={{ marginLeft: 'auto' }}>
-              {loading ? 'Loading...' : 'Refresh'}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {error && (
+      {loadingDevices ? (
+        <div className="loading">Loading devices...</div>
+      ) : error ? (
         <div className="error">
           <strong>Error:</strong> {error}
         </div>
-      )}
-
-      {stats.length > 0 && (
-        <div className="stats-container">
-          <h2>Statistics ({stats.length} items)</h2>
-          <div className="stats-grid">
-            {stats.map((stat, index) => (
-              <div key={stat.play_id || index} className="stat-card">
-                <h3>{stat.ad_filename || stat.play_id || `Play ${index + 1}`}</h3>
-                <div className="stat-details">
-                  {stat.play_id && (
-                    <div className="stat-item">
-                      <span className="label">Play ID:</span>
-                      <span className="value" style={{ fontSize: '0.9rem', fontFamily: 'monospace' }}>{stat.play_id}</span>
-                    </div>
-                  )}
-                  {stat.device_id && (
-                    <div className="stat-item">
-                      <span className="label">Device:</span>
-                      <span className="value">{stat.device_id}</span>
-                    </div>
-                  )}
-                  {stat.environment && (
-                    <div className="stat-item">
-                      <span className="label">Environment:</span>
-                      <span className="value">{stat.environment}</span>
-                    </div>
-                  )}
-                  {stat.play_duration !== undefined && (
-                    <div className="stat-item">
-                      <span className="label">Duration:</span>
-                      <span className="value">{formatDuration(stat.play_duration)}</span>
-                    </div>
-                  )}
-                  {stat.play_status && (
-                    <div className="stat-item">
-                      <span className="label">Status:</span>
-                      <span className="value" style={{ 
-                        color: stat.play_status === 'completed' ? '#28a745' : stat.play_status === 'interrupted' ? '#dc3545' : '#ffc107',
-                        fontWeight: '600'
-                      }}>{stat.play_status}</span>
-                    </div>
-                  )}
-                  {stat.switch_type && (
-                    <div className="stat-item">
-                      <span className="label">Switch Type:</span>
-                      <span className="value">{stat.switch_type}</span>
-                    </div>
-                  )}
-                  {stat.bug_detected !== undefined && (
-                    <div className="stat-item">
-                      <span className="label">Bug Detected:</span>
-                      <span className="value" style={{ 
-                        color: stat.bug_detected ? '#dc3545' : '#28a745',
-                        fontWeight: '600'
-                      }}>{stat.bug_detected ? 'Yes' : 'No'}</span>
-                    </div>
-                  )}
-                  {stat.play_start_time && (
-                    <div className="stat-item">
-                      <span className="label">Start Time:</span>
-                      <span className="value">{formatDate(stat.play_start_time)}</span>
-                    </div>
-                  )}
-                  {stat.play_end_time && (
-                    <div className="stat-item">
-                      <span className="label">End Time:</span>
-                      <span className="value">{formatDate(stat.play_end_time)}</span>
-                    </div>
-                  )}
-                  {stat.metadata?.interruption_reason && (
-                    <div className="stat-item">
-                      <span className="label">Interruption Reason:</span>
-                      <span className="value">{stat.metadata.interruption_reason}</span>
-                    </div>
-                  )}
-                </div>
-                <details className="raw-data">
-                  <summary>Raw Data</summary>
-                  <pre>{JSON.stringify(stat, null, 2)}</pre>
-                </details>
-              </div>
+      ) : devices.length === 0 ? (
+        <div className="empty-state">
+          <p>No devices found in S3 bucket.</p>
+        </div>
+      ) : (
+        <>
+          {/* Device Tabs */}
+          <div className="device-tabs">
+            {devices.map(device => (
+              <button
+                key={device}
+                className={`device-tab ${selectedDevice === device ? 'active' : ''}`}
+                onClick={() => setSelectedDevice(device)}
+                title={device}
+              >
+                {formatDeviceName(device)}
+                {deviceSummaries[device] && (
+                  <span className="tab-badge">{deviceSummaries[device].plays24hr}</span>
+                )}
+              </button>
             ))}
           </div>
-        </div>
-      )}
 
-      {!loading && stats.length === 0 && !error && (
-        <div className="empty-state">
-          <p>No statistics found. Make sure the table name is correct and contains data.</p>
-        </div>
+          {selectedDevice && (
+            <div className="device-content">
+              {/* Refresh Button */}
+              <div className="refresh-controls">
+                <button 
+                  onClick={handleRefresh} 
+                  disabled={loading}
+                  className="refresh-button"
+                >
+                  {loading ? 'Refreshing...' : '🔄 Refresh'}
+                </button>
+              </div>
+
+              {/* Summary Cards */}
+              <div className="summary-cards">
+                <div className="summary-card">
+                  <div className="summary-label">Plays (24hr)</div>
+                  <div className="summary-value">
+                    {currentSummary?.plays24hr ?? '...'}
+                  </div>
+                </div>
+                <div className="summary-card">
+                  <div className="summary-label">Plays (1hr)</div>
+                  <div className="summary-value">
+                    {currentSummary?.plays1hr ?? '...'}
+                  </div>
+                </div>
+                <div className="summary-card">
+                  <div className="summary-label">Last Play</div>
+                  <div className="summary-value small">
+                    {currentSummary?.lastPlayTime 
+                      ? formatDate(currentSummary.lastPlayTime)
+                      : '...'}
+                  </div>
+                </div>
+              </div>
+
+              {/* Time Series Graph */}
+              <div className="graph-section">
+                <h2>Ad Plays Over Time</h2>
+                <AdPlayGraph deviceId={selectedDevice} />
+              </div>
+
+              {/* Ad Aggregations Table */}
+              <div className="ads-section">
+                <h2>Ad Statistics</h2>
+                {loading ? (
+                  <div className="loading">Loading ad statistics...</div>
+                ) : currentAds.length === 0 ? (
+                  <div className="empty-state">
+                    <p>No ad statistics available for this device.</p>
+                  </div>
+                ) : (
+                  <div className="ads-table-container">
+                    <table className="ads-table">
+                      <thead>
+                        <tr>
+                          <th>Ad Filename</th>
+                          <th>Total Plays</th>
+                          <th>Total Duration</th>
+                          <th>Average Duration</th>
+                          <th>Last Played</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {currentAds.map((ad, index) => (
+                          <tr key={ad.adFilename || index}>
+                            <td>{ad.adFilename}</td>
+                            <td>{ad.totalPlays}</td>
+                            <td>{formatDuration(ad.totalDuration)}</td>
+                            <td>{formatDuration(ad.averageDuration)}</td>
+                            <td>{formatDate(ad.lastPlayed)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   )
 }
 
 export default App
-
