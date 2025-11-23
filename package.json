@@ -10,7 +10,18 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "start": "vite",
-    "server": "tsx server.ts"
+    "server": "tsx server.ts",
+    "start:prod": "NODE_ENV=production tsx server.ts",
+    "build:prod": "npm run build && npm run start:prod",
+    "pm2:start": "npx pm2 start ecosystem.config.js",
+    "pm2:stop": "npx pm2 stop attentv-control",
+    "pm2:restart": "npx pm2 restart attentv-control",
+    "pm2:delete": "npx pm2 delete attentv-control",
+    "pm2:logs": "npx pm2 logs attentv-control",
+    "pm2:status": "npx pm2 status",
+    "pm2:save": "npx pm2 save",
+    "pm2:startup": "npx pm2 startup",
+    "deploy": "npm run build && npm run pm2:start && npm run pm2:save"
   },
   "keywords": [],
   "author": "",
@@ -34,6 +45,7 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^9.2.1",
+    "pm2": "^5.3.1",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^5.4.21"

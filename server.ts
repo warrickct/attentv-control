@@ -1,16 +1,28 @@
 import express from 'express'
 import cors from 'cors'
+import path from 'path'
+import { fileURLToPath } from 'url'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3'
 import { fromIni } from '@aws-sdk/credential-providers'
 
+// Get __dirname equivalent for ES modules
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
 const app = express()
 const PORT = process.env.PORT || 3001
+const HOST = process.env.HOST || '0.0.0.0' // Bind to all interfaces for network access
 
 // Middleware
 app.use(cors())
 app.use(express.json())
+
+// Serve static files from dist directory in production
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, 'dist')))
+}
 
 // Handle favicon requests to avoid CSP errors
 app.get('/favicon.ico', (req, res) => {
@@ -526,8 +538,22 @@ app.get('/api/tables', async (req, res) => {
   }
 })
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`)
+// Serve React app for all non-API routes (production only)
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    // Don't serve index.html for API routes
+    if (req.path.startsWith('/api/')) {
+      return res.status(404).json({ error: 'Not found' })
+    }
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'))
+  })
+}
+
+app.listen(Number(PORT), HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`)
   console.log(`📊 Ad Statistics Monitor API ready`)
+  if (process.env.NODE_ENV === 'production') {
+    console.log(`🌐 Access from network: http://<your-ip>:${PORT}`)
+  }
 })
 
