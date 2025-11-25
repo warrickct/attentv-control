@@ -1,6 +1,6 @@
 import express from 'express'
 import cors from 'cors'
-import path from 'path'
+import path, { dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
@@ -55,16 +55,18 @@ interface CacheEntry<T> {
 }
 
 const CACHE_TTL = 30000 // 30 seconds
+const AGGREGATE_CACHE_TTL = 60000 // 60 seconds for aggregate queries
 const deviceSummaryCache = new Map<string, CacheEntry<any>>()
 const deviceAdsCache = new Map<string, CacheEntry<any>>()
+const aggregateCache = new Map<string, CacheEntry<any>>()
 
 // Helper to get cached data or null if expired
-function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string): T | null {
+function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string, ttl: number = CACHE_TTL): T | null {
   const entry = cache.get(key)
   if (!entry) return null
   
   const age = Date.now() - entry.timestamp
-  if (age > CACHE_TTL) {
+  if (age > ttl) {
     cache.delete(key)
     return null
   }
@@ -418,6 +420,548 @@ app.get('/api/stats/device/:deviceId/ads', async (req, res) => {
     console.error('Error fetching ad aggregations:', error)
     res.status(500).json({
       error: error.message || 'Failed to fetch ad aggregations',
+      code: error.name,
+    })
+  }
+})
+
+// Helper function to get all devices
+async function getAllDevices(): Promise<string[]> {
+  try {
+    const command = new ListObjectsV2Command({
+      Bucket: S3_BUCKET,
+      Delimiter: '/',
+    })
+    const response = await s3Client.send(command)
+    return (response.CommonPrefixes || [])
+      .map(prefix => prefix.Prefix?.replace('/', ''))
+      .filter((device): device is string => !!device && device !== 'ad_metrics')
+      .sort()
+  } catch (error) {
+    console.error('Error getting devices:', error)
+    return []
+  }
+}
+
+// Helper function to get all items for a device with pagination
+async function getAllItemsForDevice(deviceId: string): Promise<any[]> {
+  const tableName = 'attentv-ad-plays-prod'
+  const items: any[] = []
+  let lastEvaluatedKey = undefined
+  let hasMore = true
+
+  while (hasMore) {
+    const queryParams: any = {
+      TableName: tableName,
+      IndexName: 'device-index',
+      KeyConditionExpression: '#device = :device',
+      ExpressionAttributeNames: {
+        '#device': 'device_id',
+      },
+      ExpressionAttributeValues: {
+        ':device': deviceId,
+      },
+    }
+
+    if (lastEvaluatedKey) {
+      queryParams.ExclusiveStartKey = lastEvaluatedKey
+    }
+
+    const query = new QueryCommand(queryParams)
+    const response = await docClient.send(query)
+    
+    if (response.Items) {
+      items.push(...response.Items)
+    }
+    
+    lastEvaluatedKey = response.LastEvaluatedKey
+    hasMore = !!lastEvaluatedKey
+  }
+
+  return items
+}
+
+// Get aggregate summary across all devices
+app.get('/api/stats/aggregate/summary', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const cacheKey = 'aggregate-summary'
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const tableName = 'attentv-ad-plays-prod'
+    
+    const now = new Date()
+    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
+
+    // Get all items across all devices
+    const allItems: any[] = []
+    const uniqueAds = new Set<string>()
+    let totalDuration = 0
+
+    for (const deviceId of devices) {
+      const items = await getAllItemsForDevice(deviceId)
+      allItems.push(...items)
+      
+      items.forEach(item => {
+        if (item.ad_filename) uniqueAds.add(item.ad_filename)
+        if (item.play_duration) totalDuration += item.play_duration
+      })
+    }
+
+    const totalPlays = allItems.length
+    const totalPlays24hr = allItems.filter(item => item.timestamp >= oneDayAgo).length
+    const totalPlays7d = allItems.filter(item => item.timestamp >= sevenDaysAgo).length
+    const totalPlays30d = allItems.filter(item => item.timestamp >= thirtyDaysAgo).length
+    const activeDevices = devices.length
+    const avgPlaysPerDevice = activeDevices > 0 ? totalPlays / activeDevices : 0
+
+    const response = {
+      totalPlays,
+      totalPlays24hr,
+      totalPlays7d,
+      totalPlays30d,
+      uniqueAds: uniqueAds.size,
+      totalDuration,
+      activeDevices,
+      avgPlaysPerDevice: Math.round(avgPlaysPerDevice * 100) / 100,
+    }
+
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching aggregate summary:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch aggregate summary',
+      code: error.name,
+    })
+  }
+})
+
+// Get hourly patterns (hour of day and optionally day of week)
+app.get('/api/stats/aggregate/hourly-patterns', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const includeDayOfWeek = req.query.dayOfWeek === 'true'
+    const cacheKey = `hourly-patterns-${includeDayOfWeek}`
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const allItems: any[] = []
+
+    for (const deviceId of devices) {
+      const items = await getAllItemsForDevice(deviceId)
+      allItems.push(...items)
+    }
+
+    // Group by hour (and optionally day of week)
+    const hourMap = new Map<string, { plays: number, duration: number }>()
+
+    allItems.forEach(item => {
+      if (!item.timestamp) return
+      
+      const date = new Date(item.timestamp)
+      const hour = date.getUTCHours()
+      const dayOfWeek = includeDayOfWeek ? date.getUTCDay() : null
+      const key = includeDayOfWeek ? `${hour}-${dayOfWeek}` : `${hour}`
+      
+      const existing = hourMap.get(key) || { plays: 0, duration: 0 }
+      hourMap.set(key, {
+        plays: existing.plays + 1,
+        duration: existing.duration + (item.play_duration || 0),
+      })
+    })
+
+    const result = Array.from(hourMap.entries()).map(([key, data]) => {
+      const [hour, dayOfWeek] = key.split('-').map(Number)
+      return {
+        hour: Number(hour),
+        dayOfWeek: includeDayOfWeek && dayOfWeek !== undefined ? dayOfWeek : undefined,
+        plays: data.plays,
+        duration: data.duration,
+      }
+    })
+
+    const response = { patterns: result }
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching hourly patterns:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch hourly patterns',
+      code: error.name,
+    })
+  }
+})
+
+// Get day of week patterns
+app.get('/api/stats/aggregate/day-of-week', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const cacheKey = 'day-of-week'
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const allItems: any[] = []
+
+    for (const deviceId of devices) {
+      const items = await getAllItemsForDevice(deviceId)
+      allItems.push(...items)
+    }
+
+    // Group by day of week (0 = Sunday, 6 = Saturday)
+    const dayMap = new Map<number, { plays: number, duration: number }>()
+
+    allItems.forEach(item => {
+      if (!item.timestamp) return
+      
+      const date = new Date(item.timestamp)
+      const dayOfWeek = date.getUTCDay()
+      
+      const existing = dayMap.get(dayOfWeek) || { plays: 0, duration: 0 }
+      dayMap.set(dayOfWeek, {
+        plays: existing.plays + 1,
+        duration: existing.duration + (item.play_duration || 0),
+      })
+    })
+
+    const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    const result = Array.from(dayMap.entries())
+      .map(([dayOfWeek, data]) => ({
+        dayOfWeek,
+        dayName: dayNames[dayOfWeek],
+        plays: data.plays,
+        duration: data.duration,
+      }))
+      .sort((a, b) => a.dayOfWeek - b.dayOfWeek)
+
+    const response = { patterns: result }
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching day of week patterns:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch day of week patterns',
+      code: error.name,
+    })
+  }
+})
+
+// Get week-over-week comparison
+app.get('/api/stats/aggregate/week-comparison', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const cacheKey = 'week-comparison'
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const allItems: any[] = []
+
+    for (const deviceId of devices) {
+      const items = await getAllItemsForDevice(deviceId)
+      allItems.push(...items)
+    }
+
+    const now = new Date()
+    const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
+    const twoWeeksAgo = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000)
+
+    // Current week (last 7 days)
+    const currentWeekItems = allItems.filter(item => {
+      if (!item.timestamp) return false
+      const date = new Date(item.timestamp)
+      return date >= oneWeekAgo
+    })
+
+    // Previous week (7-14 days ago)
+    const previousWeekItems = allItems.filter(item => {
+      if (!item.timestamp) return false
+      const date = new Date(item.timestamp)
+      return date >= twoWeeksAgo && date < oneWeekAgo
+    })
+
+    const getWeekStats = (items: any[]) => {
+      const uniqueAds = new Set<string>()
+      let totalDuration = 0
+      
+      items.forEach(item => {
+        if (item.ad_filename) uniqueAds.add(item.ad_filename)
+        if (item.play_duration) totalDuration += item.play_duration
+      })
+
+      return {
+        plays: items.length,
+        duration: totalDuration,
+        uniqueAds: uniqueAds.size,
+      }
+    }
+
+    const currentWeek = getWeekStats(currentWeekItems)
+    const previousWeek = getWeekStats(previousWeekItems)
+
+    const change = {
+      plays: currentWeek.plays - previousWeek.plays,
+      duration: currentWeek.duration - previousWeek.duration,
+      uniqueAds: currentWeek.uniqueAds - previousWeek.uniqueAds,
+    }
+
+    const response = {
+      currentWeek,
+      previousWeek,
+      change,
+    }
+
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching week comparison:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch week comparison',
+      code: error.name,
+    })
+  }
+})
+
+// Get top ads leaderboard across all devices
+app.get('/api/stats/ads/leaderboard', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const limit = parseInt(req.query.limit as string) || 20
+    const sortBy = (req.query.sortBy as string) || 'plays' // plays, duration, frequency
+    const cacheKey = `ads-leaderboard-${limit}-${sortBy}`
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const tableName = 'attentv-ad-plays-prod'
+    
+    // Get all unique ads from S3
+    const allAds = new Set<string>()
+    for (const deviceId of devices) {
+      const prefix = `${deviceId}/`
+      const s3Command = new ListObjectsV2Command({
+        Bucket: S3_BUCKET,
+        Prefix: prefix,
+      })
+      const s3Response = await s3Client.send(s3Command)
+      const ads = (s3Response.Contents || [])
+        .map(obj => obj.Key?.replace(prefix, ''))
+        .filter((ad): ad is string => !!ad && ad.endsWith('.mp4'))
+      ads.forEach(ad => allAds.add(ad))
+    }
+
+    // Get stats for each ad across all devices
+    const adStats = await Promise.all(
+      Array.from(allAds).map(async (adFilename) => {
+        try {
+          const items: any[] = []
+          const deviceSet = new Set<string>()
+
+          // Query each device for this ad
+          for (const deviceId of devices) {
+            let lastEvaluatedKey = undefined
+            let hasMore = true
+
+            while (hasMore) {
+              const queryParams: any = {
+                TableName: tableName,
+                IndexName: 'device-index',
+                KeyConditionExpression: '#device = :device',
+                FilterExpression: '#ad = :ad',
+                ExpressionAttributeNames: {
+                  '#device': 'device_id',
+                  '#ad': 'ad_filename',
+                },
+                ExpressionAttributeValues: {
+                  ':device': deviceId,
+                  ':ad': adFilename,
+                },
+              }
+
+              if (lastEvaluatedKey) {
+                queryParams.ExclusiveStartKey = lastEvaluatedKey
+              }
+
+              const query = new QueryCommand(queryParams)
+              const response = await docClient.send(query)
+              
+              if (response.Items) {
+                items.push(...response.Items)
+                deviceSet.add(deviceId)
+              }
+              
+              lastEvaluatedKey = response.LastEvaluatedKey
+              hasMore = !!lastEvaluatedKey
+            }
+          }
+
+          const totalPlays = items.length
+          const totalDuration = items.reduce((sum, item) => sum + (item.play_duration || 0), 0)
+          const averageDuration = totalPlays > 0 ? totalDuration / totalPlays : 0
+          
+          // Calculate frequency (plays per day)
+          let frequency = 0
+          if (items.length > 0) {
+            const sorted = items.sort((a, b) => {
+              const timeA = new Date(a.timestamp || 0).getTime()
+              const timeB = new Date(b.timestamp || 0).getTime()
+              return timeA - timeB
+            })
+            const firstPlay = new Date(sorted[0].timestamp)
+            const lastPlay = new Date(sorted[sorted.length - 1].timestamp)
+            const daysDiff = Math.max(1, (lastPlay.getTime() - firstPlay.getTime()) / (1000 * 60 * 60 * 24))
+            frequency = totalPlays / daysDiff
+          }
+
+          // Find last played
+          let lastPlayed: string | null = null
+          if (items.length > 0) {
+            const sorted = [...items].sort((a, b) => {
+              const timeA = new Date(a.timestamp || 0).getTime()
+              const timeB = new Date(b.timestamp || 0).getTime()
+              return timeB - timeA
+            })
+            lastPlayed = sorted[0]?.timestamp || null
+          }
+
+          return {
+            adFilename,
+            totalPlays,
+            totalDuration,
+            averageDuration,
+            frequency: Math.round(frequency * 100) / 100,
+            deviceCount: deviceSet.size,
+            lastPlayed,
+          }
+        } catch (error: any) {
+          console.error(`Error fetching stats for ad ${adFilename}:`, error)
+          return {
+            adFilename,
+            totalPlays: 0,
+            totalDuration: 0,
+            averageDuration: 0,
+            frequency: 0,
+            deviceCount: 0,
+            lastPlayed: null,
+            error: error.message,
+          }
+        }
+      })
+    )
+
+    // Sort by requested field
+    const sorted = adStats.sort((a, b) => {
+      switch (sortBy) {
+        case 'duration':
+          return b.totalDuration - a.totalDuration
+        case 'frequency':
+          return b.frequency - a.frequency
+        case 'plays':
+        default:
+          return b.totalPlays - a.totalPlays
+      }
+    })
+
+    const response = {
+      ads: sorted.slice(0, limit),
+      total: sorted.length,
+    }
+
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching ads leaderboard:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch ads leaderboard',
+      code: error.name,
+    })
+  }
+})
+
+// Get device comparison metrics
+app.get('/api/stats/devices/comparison', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const cacheKey = 'devices-comparison'
+    
+    if (!forceRefresh) {
+      const cached = getCached(aggregateCache, cacheKey, AGGREGATE_CACHE_TTL)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const devices = await getAllDevices()
+    const tableName = 'attentv-ad-plays-prod'
+    
+    const deviceStats = await Promise.all(
+      devices.map(async (deviceId) => {
+        const items = await getAllItemsForDevice(deviceId)
+        
+        const totalPlays = items.length
+        const totalDuration = items.reduce((sum, item) => sum + (item.play_duration || 0), 0)
+        
+        // Calculate average plays per day
+        let avgPlaysPerDay = 0
+        if (items.length > 0) {
+          const sorted = items.sort((a, b) => {
+            const timeA = new Date(a.timestamp || 0).getTime()
+            const timeB = new Date(b.timestamp || 0).getTime()
+            return timeA - timeB
+          })
+          const firstPlay = new Date(sorted[0].timestamp)
+          const lastPlay = new Date(sorted[sorted.length - 1].timestamp)
+          const daysDiff = Math.max(1, (lastPlay.getTime() - firstPlay.getTime()) / (1000 * 60 * 60 * 24))
+          avgPlaysPerDay = totalPlays / daysDiff
+        }
+
+        return {
+          deviceId,
+          totalPlays,
+          avgPlaysPerDay: Math.round(avgPlaysPerDay * 100) / 100,
+          totalDuration,
+        }
+      })
+    )
+
+    const response = { devices: deviceStats }
+    setCached(aggregateCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching device comparison:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch device comparison',
       code: error.name,
     })
   }

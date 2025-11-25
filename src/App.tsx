@@ -1,6 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import './App.css'
 import AdPlayGraph from './AdPlayGraph'
+import AdDurationGraph from './AdDurationGraph'
+import AggregateDashboard from './AggregateDashboard'
+import HourOfDayHeatmap from './HourOfDayHeatmap'
+import DayOfWeekChart from './DayOfWeekChart'
+import WeekOverWeekChart from './WeekOverWeekChart'
+import TopAdsLeaderboard from './TopAdsLeaderboard'
+import DeviceComparisonChart from './DeviceComparisonChart'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -21,9 +28,12 @@ interface AdAggregation {
   error?: string
 }
 
+type ViewMode = 'overview' | 'device'
+
 function App() {
   const [devices, setDevices] = useState<string[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null)
+  const [viewMode, setViewMode] = useState<ViewMode>('overview')
   const [deviceSummaries, setDeviceSummaries] = useState<Record<string, DeviceSummary>>({})
   const [adAggregations, setAdAggregations] = useState<Record<string, AdAggregation[]>>({})
   const [loading, setLoading] = useState(false)
@@ -207,25 +217,77 @@ function App() {
         </div>
       ) : (
         <>
-          {/* Device Tabs */}
-          <div className="device-tabs">
-            {devices.map(device => (
-              <button
-                key={device}
-                className={`device-tab ${selectedDevice === device ? 'active' : ''}`}
-                onClick={() => setSelectedDevice(device)}
-                title={device}
-              >
-                {formatDeviceName(device)}
-                {deviceSummaries[device] && (
-                  <span className="tab-badge">{deviceSummaries[device].plays24hr}</span>
-                )}
-              </button>
-            ))}
+          {/* View Mode Tabs */}
+          <div className="view-mode-tabs">
+            <button
+              className={`view-mode-tab ${viewMode === 'overview' ? 'active' : ''}`}
+              onClick={() => setViewMode('overview')}
+            >
+              Overview
+            </button>
+            <button
+              className={`view-mode-tab ${viewMode === 'device' ? 'active' : ''}`}
+              onClick={() => {
+                setViewMode('device')
+                if (!selectedDevice && devices.length > 0) {
+                  setSelectedDevice(devices[0])
+                }
+              }}
+            >
+              Device Details
+            </button>
           </div>
 
-          {selectedDevice && (
+          {viewMode === 'overview' ? (
+            <div className="overview-content">
+              <AggregateDashboard />
+              
+              <div className="insights-section">
+                <h2>Time-Based Patterns</h2>
+                <div className="charts-grid">
+                  <div className="chart-item">
+                    <HourOfDayHeatmap includeDayOfWeek={false} />
+                  </div>
+                  <div className="chart-item">
+                    <DayOfWeekChart />
+                  </div>
+                  <div className="chart-item full-width">
+                    <WeekOverWeekChart />
+                  </div>
+                </div>
+              </div>
+
+              <div className="insights-section">
+                <h2>Performance Insights</h2>
+                <div className="charts-grid">
+                  <div className="chart-item full-width">
+                    <TopAdsLeaderboard />
+                  </div>
+                  <div className="chart-item full-width">
+                    <DeviceComparisonChart />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : selectedDevice && (
             <div className="device-content">
+              {/* Device Tabs */}
+              <div className="device-tabs">
+                {devices.map(device => (
+                  <button
+                    key={device}
+                    className={`device-tab ${selectedDevice === device ? 'active' : ''}`}
+                    onClick={() => setSelectedDevice(device)}
+                    title={device}
+                  >
+                    {formatDeviceName(device)}
+                    {deviceSummaries[device] && (
+                      <span className="tab-badge">{deviceSummaries[device].plays24hr}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
               {/* Refresh Button */}
               <div className="refresh-controls">
                 <button 
@@ -261,10 +323,16 @@ function App() {
                 </div>
               </div>
 
-              {/* Time Series Graph */}
+              {/* Time Series Graph - Plays */}
               <div className="graph-section">
                 <h2>Ad Plays Over Time</h2>
                 <AdPlayGraph deviceId={selectedDevice} />
+              </div>
+
+              {/* Time Series Graph - Duration */}
+              <div className="graph-section">
+                <h2>Ad Duration Over Time</h2>
+                <AdDurationGraph deviceId={selectedDevice} />
               </div>
 
               {/* Ad Aggregations Table */}

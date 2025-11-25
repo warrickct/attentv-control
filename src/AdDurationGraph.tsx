@@ -13,11 +13,11 @@ interface TimeSeriesItem {
 type RangeOption = '1h' | '1d' | '1w' | '1month' | 'total'
 type GranularityOption = 'minute' | 'hour' | 'day' | 'week' | '1%' | '5%' | '10%'
 
-interface AdPlayGraphProps {
+interface AdDurationGraphProps {
   deviceId: string
 }
 
-export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
+export default function AdDurationGraph({ deviceId }: AdDurationGraphProps) {
   const [timeSeriesData, setTimeSeriesData] = useState<TimeSeriesItem[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -244,7 +244,7 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
     }
   }
 
-  // Bucket data by time intervals
+  // Bucket data by time intervals - aggregate by duration instead of count
   const bucketedData = useMemo(() => {
     if (filteredData.length === 0) return []
 
@@ -278,21 +278,31 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
       bucket.ads.set(item.ad_filename, adData)
     })
 
-    // Convert to array and sort by time
+    // Calculate bucket size in seconds for percentage calculation
+    const bucketSizeSeconds = bucketSize / 1000
+
+    // Convert to array and sort by time - use duration instead of count
     const result = Array.from(buckets.entries())
       .map(([time, data]) => {
+        const percentage = bucketSizeSeconds > 0 ? (data.totalDuration / bucketSizeSeconds) * 100 : 0
         const entry: any = {
           time: formatTimeLabel(time, granularity),
           timestamp: time,
           fullTime: new Date(time).toLocaleString(),
-          total: data.count,
+          total: data.totalDuration, // Use duration instead of count
+          totalPlays: data.count, // Keep count for tooltip
           totalDuration: data.totalDuration,
+          bucketSizeSeconds, // Store for tooltip
+          percentage, // Percentage of bucket time spent playing ads
         }
         
-        // Add counts per ad
+        // Add duration per ad (instead of count)
         data.ads.forEach((adData, adFilename) => {
-          entry[adFilename] = adData.count
+          const adPercentage = bucketSizeSeconds > 0 ? (adData.duration / bucketSizeSeconds) * 100 : 0
+          entry[adFilename] = adData.duration // Use duration instead of count
+          entry[`${adFilename}_count`] = adData.count // Keep count for tooltip
           entry[`${adFilename}_duration`] = adData.duration
+          entry[`${adFilename}_percentage`] = adPercentage // Percentage for this ad
         })
         
         return entry
@@ -343,9 +353,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
         {useCustomDateRange ? (
           <>
             <div className="control-group">
-              <label htmlFor="start-date">Start Date:</label>
+              <label htmlFor="start-date-duration">Start Date:</label>
               <input
-                id="start-date"
+                id="start-date-duration"
                 type="date"
                 value={customStartDate}
                 onChange={(e) => setCustomStartDate(e.target.value)}
@@ -354,9 +364,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
               />
             </div>
             <div className="control-group">
-              <label htmlFor="end-date">End Date:</label>
+              <label htmlFor="end-date-duration">End Date:</label>
               <input
-                id="end-date"
+                id="end-date-duration"
                 type="date"
                 value={customEndDate}
                 onChange={(e) => setCustomEndDate(e.target.value)}
@@ -367,9 +377,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
           </>
         ) : (
           <div className="control-group">
-            <label htmlFor="range-select">Range:</label>
+            <label htmlFor="range-select-duration">Range:</label>
             <select
-              id="range-select"
+              id="range-select-duration"
               value={range}
               onChange={(e) => setRange(e.target.value as RangeOption)}
               className="control-select"
@@ -383,9 +393,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
           </div>
         )}
         <div className="control-group">
-          <label htmlFor="granularity-select">Granularity:</label>
+          <label htmlFor="granularity-select-duration">Granularity:</label>
           <select
-            id="granularity-select"
+            id="granularity-select-duration"
             value={granularity}
             onChange={(e) => setGranularity(e.target.value as GranularityOption)}
             className="control-select"
@@ -427,9 +437,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
         {useTimeRangeFilter && (
           <>
             <div className="control-group">
-              <label htmlFor="time-start">Start Time:</label>
+              <label htmlFor="time-start-duration">Start Time:</label>
               <input
-                id="time-start"
+                id="time-start-duration"
                 type="time"
                 value={timeRangeStart}
                 onChange={(e) => setTimeRangeStart(e.target.value)}
@@ -438,9 +448,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
               />
             </div>
             <div className="control-group">
-              <label htmlFor="time-end">End Time:</label>
+              <label htmlFor="time-end-duration">End Time:</label>
               <input
-                id="time-end"
+                id="time-end-duration"
                 type="time"
                 value={timeRangeEnd}
                 onChange={(e) => setTimeRangeEnd(e.target.value)}
@@ -452,7 +462,7 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
         )}
         <div className="control-info">
           <span>Data points: {bucketedData.length}</span>
-          <span>Total plays: {filteredData.length}</span>
+          <span>Total duration: {formatDuration(bucketedData.reduce((sum, d) => sum + (d.totalDuration || 0), 0))}</span>
         </div>
       </div>
 
@@ -474,38 +484,56 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
             />
             <YAxis />
             <Tooltip 
-              contentStyle={{ backgroundColor: 'rgba(255, 255, 255, 0.95)', border: '1px solid #ccc' }}
+              contentStyle={{ backgroundColor: 'rgba(255, 255, 255, 0.95)', border: '1px solid #ccc', padding: '12px' }}
               labelFormatter={(value) => {
                 const item = bucketedData.find(d => d.time === value)
                 return item?.fullTime || value
               }}
               formatter={(value: any, name: string, props: any) => {
                 const item = props.payload
-                if (name === 'Total Plays') {
+                if (name === 'Total Duration') {
+                  const avgDuration = item.totalPlays > 0 ? (value / item.totalPlays) : 0
+                  const percentage = item.percentage || 0
                   return [
-                    <>
-                      <div>{value} plays</div>
-                      <div style={{ color: '#666', fontSize: '0.85em', marginTop: '4px' }}>
-                        Total Duration: {formatDuration(item.totalDuration)}
+                    <div key="total" style={{ lineHeight: '1.6' }}>
+                      <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>All Ads Combined</div>
+                      <div>Total Duration: <strong>{formatDuration(value)}</strong></div>
+                      <div style={{ color: '#666', fontSize: '0.9em' }}>
+                        Total Plays: {item.totalPlays}
                       </div>
-                    </>,
-                    name
+                      <div style={{ color: '#666', fontSize: '0.9em', marginTop: '2px' }}>
+                        Avg Duration/Play: {formatDuration(avgDuration)}
+                      </div>
+                      <div style={{ color: '#667eea', fontSize: '0.9em', marginTop: '4px', fontWeight: '600' }}>
+                        {percentage.toFixed(1)}% of time bucket
+                      </div>
+                    </div>,
+                    ''
                   ]
                 }
-                // For individual ads, show count and duration
-                const adDuration = item[`${name}_duration`]
-                if (adDuration !== undefined) {
+                // For individual ads, show duration and count
+                const adCount = item[`${name}_count`]
+                if (adCount !== undefined && adCount > 0) {
+                  const avgDuration = value / adCount
+                  const adPercentage = item[`${name}_percentage`] || 0
                   return [
-                    <>
-                      <div>{value} plays</div>
-                      <div style={{ color: '#666', fontSize: '0.85em', marginTop: '4px' }}>
-                        Duration: {formatDuration(adDuration)}
+                    <div key={name} style={{ lineHeight: '1.6' }}>
+                      <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{name}</div>
+                      <div>Total Duration: <strong>{formatDuration(value)}</strong></div>
+                      <div style={{ color: '#666', fontSize: '0.9em' }}>
+                        Plays: {adCount}
                       </div>
-                    </>,
-                    name
+                      <div style={{ color: '#666', fontSize: '0.9em', marginTop: '2px' }}>
+                        Avg Duration/Play: {formatDuration(avgDuration)}
+                      </div>
+                      <div style={{ color: '#667eea', fontSize: '0.9em', marginTop: '4px', fontWeight: '600' }}>
+                        {adPercentage.toFixed(1)}% of time bucket
+                      </div>
+                    </div>,
+                    ''
                   ]
                 }
-                return [value, name]
+                return [formatDuration(value), name]
               }}
             />
             <Legend 
@@ -517,7 +545,7 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
               dataKey="total" 
               stroke="#667eea" 
               strokeWidth={2}
-              name="Total Plays"
+              name="Total Duration"
               dot={false}
             />
             {adFilenames.map((adFilename, index) => (
@@ -541,22 +569,22 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
           <h3>Summary Statistics</h3>
           <div className="summary-stats-grid">
             <div className="summary-stat-card">
-              <div className="stat-label">Total Plays</div>
-              <div className="stat-value">{filteredData.length.toLocaleString()}</div>
-            </div>
-            <div className="summary-stat-card">
-              <div className="stat-label">Average Plays per Bucket</div>
-              <div className="stat-value">
-                {bucketedData.length > 0 
-                  ? (filteredData.length / bucketedData.length).toFixed(1)
-                  : '0'}
-              </div>
-            </div>
-            <div className="summary-stat-card">
               <div className="stat-label">Total Duration</div>
               <div className="stat-value">
                 {formatDuration(filteredData.reduce((sum, item) => sum + (item.play_duration || 0), 0))}
               </div>
+            </div>
+            <div className="summary-stat-card">
+              <div className="stat-label">Average Duration per Bucket</div>
+              <div className="stat-value">
+                {bucketedData.length > 0
+                  ? formatDuration(bucketedData.reduce((sum, d) => sum + (d.totalDuration || 0), 0) / bucketedData.length)
+                  : '0s'}
+              </div>
+            </div>
+            <div className="summary-stat-card">
+              <div className="stat-label">Total Plays</div>
+              <div className="stat-value">{filteredData.length.toLocaleString()}</div>
             </div>
             <div className="summary-stat-card">
               <div className="stat-label">Average Duration per Play</div>
@@ -564,6 +592,17 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
                 {filteredData.length > 0
                   ? formatDuration(filteredData.reduce((sum, item) => sum + (item.play_duration || 0), 0) / filteredData.length)
                   : '0s'}
+              </div>
+            </div>
+            <div className="summary-stat-card">
+              <div className="stat-label">% of Time Range</div>
+              <div className="stat-value">
+                {(() => {
+                  const totalDuration = filteredData.reduce((sum, item) => sum + (item.play_duration || 0), 0)
+                  const rangeSeconds = (dateRange.end.getTime() - dateRange.start.getTime()) / 1000
+                  const percentage = rangeSeconds > 0 ? (totalDuration / rangeSeconds) * 100 : 0
+                  return `${percentage.toFixed(1)}%`
+                })()}
               </div>
             </div>
           </div>
@@ -577,10 +616,10 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
                   <thead>
                     <tr>
                       <th>Ad</th>
-                      <th>Total Plays</th>
                       <th>Total Duration</th>
+                      <th>Total Plays</th>
                       <th>Avg Duration/Play</th>
-                      <th>% of Total Plays</th>
+                      <th>% of Total Duration</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -589,13 +628,14 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
                       const adTotalPlays = adItems.length
                       const adTotalDuration = adItems.reduce((sum, item) => sum + (item.play_duration || 0), 0)
                       const adAvgDuration = adTotalPlays > 0 ? adTotalDuration / adTotalPlays : 0
-                      const adPercentage = filteredData.length > 0 ? (adTotalPlays / filteredData.length) * 100 : 0
+                      const totalDuration = filteredData.reduce((sum, item) => sum + (item.play_duration || 0), 0)
+                      const adPercentage = totalDuration > 0 ? (adTotalDuration / totalDuration) * 100 : 0
                       
                       return (
                         <tr key={adFilename}>
                           <td>{adFilename}</td>
-                          <td>{adTotalPlays.toLocaleString()}</td>
                           <td>{formatDuration(adTotalDuration)}</td>
+                          <td>{adTotalPlays.toLocaleString()}</td>
                           <td>{formatDuration(adAvgDuration)}</td>
                           <td>{adPercentage.toFixed(1)}%</td>
                         </tr>
