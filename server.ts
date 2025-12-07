@@ -4,7 +4,8 @@ import path, { dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
-import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3'
+import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { fromIni } from '@aws-sdk/credential-providers'
 
 // Get __dirname equivalent for ES modules
@@ -47,6 +48,9 @@ const s3Client = new S3Client({
 })
 
 const S3_BUCKET = 'attntv'
+const SCREENSHOT_BUCKET = process.env.NODE_ENV === 'production' 
+  ? 'attentv-iot-screenshots-prod' 
+  : 'attentv-iot-screenshots-dev'
 
 // Cache for device data (in-memory)
 interface CacheEntry<T> {
@@ -1077,6 +1081,78 @@ app.get('/api/tables', async (req, res) => {
     console.error('Error listing tables:', error)
     res.status(500).json({
       error: error.message || 'Failed to list tables',
+      code: error.name,
+    })
+  }
+})
+
+// Get latest screenshots for all devices
+app.get('/api/screenshots', async (req, res) => {
+  try {
+    const devices = await getAllDevices()
+    const screenshotData = await Promise.all(
+      devices.map(async (deviceId) => {
+        try {
+          const prefix = `${deviceId}/`
+          const command = new ListObjectsV2Command({
+            Bucket: SCREENSHOT_BUCKET,
+            Prefix: prefix,
+          })
+
+          const response = await s3Client.send(command)
+          const screenshots = (response.Contents || [])
+            .filter(obj => obj.Key && obj.Key.endsWith('.png'))
+            .sort((a, b) => {
+              // Sort by LastModified date (most recent first)
+              const timeA = a.LastModified?.getTime() || 0
+              const timeB = b.LastModified?.getTime() || 0
+              return timeB - timeA
+            })
+
+          if (screenshots.length === 0) {
+            return {
+              deviceId,
+              screenshotUrl: null,
+              screenshotKey: null,
+              lastModified: null,
+            }
+          }
+
+          const latest = screenshots[0]
+          const screenshotKey = latest.Key!
+
+          // Generate presigned URL (valid for 1 hour)
+          const getObjectCommand = new GetObjectCommand({
+            Bucket: SCREENSHOT_BUCKET,
+            Key: screenshotKey,
+          })
+          
+          const screenshotUrl = await getSignedUrl(s3Client, getObjectCommand, { expiresIn: 3600 })
+
+          return {
+            deviceId,
+            screenshotUrl,
+            screenshotKey,
+            lastModified: latest.LastModified?.toISOString() || null,
+          }
+        } catch (error: any) {
+          console.error(`Error fetching screenshot for ${deviceId}:`, error)
+          return {
+            deviceId,
+            screenshotUrl: null,
+            screenshotKey: null,
+            lastModified: null,
+            error: error.message,
+          }
+        }
+      })
+    )
+
+    res.json({ screenshots: screenshotData })
+  } catch (error: any) {
+    console.error('Error fetching screenshots:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch screenshots',
       code: error.name,
     })
   }

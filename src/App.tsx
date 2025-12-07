@@ -8,6 +8,7 @@ import DayOfWeekChart from './DayOfWeekChart'
 import WeekOverWeekChart from './WeekOverWeekChart'
 import TopAdsLeaderboard from './TopAdsLeaderboard'
 import DeviceComparisonChart from './DeviceComparisonChart'
+import ScreenshotGallery from './ScreenshotGallery'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -28,12 +29,12 @@ interface AdAggregation {
   error?: string
 }
 
-type ViewMode = 'overview' | 'device'
+type ViewMode = 'screenshots' | 'overview' | 'device'
 
 function App() {
   const [devices, setDevices] = useState<string[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null)
-  const [viewMode, setViewMode] = useState<ViewMode>('overview')
+  const [viewMode, setViewMode] = useState<ViewMode>('screenshots')
   const [deviceSummaries, setDeviceSummaries] = useState<Record<string, DeviceSummary>>({})
   const [adAggregations, setAdAggregations] = useState<Record<string, AdAggregation[]>>({})
   const [loading, setLoading] = useState(false)
@@ -220,6 +221,12 @@ function App() {
           {/* View Mode Tabs */}
           <div className="view-mode-tabs">
             <button
+              className={`view-mode-tab ${viewMode === 'screenshots' ? 'active' : ''}`}
+              onClick={() => setViewMode('screenshots')}
+            >
+              Screenshots
+            </button>
+            <button
               className={`view-mode-tab ${viewMode === 'overview' ? 'active' : ''}`}
               onClick={() => setViewMode('overview')}
             >
@@ -238,7 +245,11 @@ function App() {
             </button>
           </div>
 
-          {viewMode === 'overview' ? (
+          {viewMode === 'screenshots' ? (
+            <div className="screenshots-content">
+              <ScreenshotGallery />
+            </div>
+          ) : viewMode === 'overview' ? (
             <div className="overview-content">
               <AggregateDashboard />
               
