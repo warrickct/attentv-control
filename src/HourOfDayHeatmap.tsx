@@ -91,16 +91,6 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
     }
   }, [patterns, includeDayOfWeek])
 
-  // Get max value for color scaling
-  const maxPlays = useMemo(() => {
-    return Math.max(...chartData.map(d => {
-      if (includeDayOfWeek) {
-        return Math.max(...['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map(day => d[day] || 0))
-      }
-      return d.plays || 0
-    }), 1)
-  }, [chartData, includeDayOfWeek])
-
   if (loading) {
     return <div className="loading">Loading hourly patterns...</div>
   }
