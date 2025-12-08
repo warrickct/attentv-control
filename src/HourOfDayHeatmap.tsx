@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from 'react'
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts'
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
 
@@ -100,15 +100,6 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
       return d.plays || 0
     }), 1)
   }, [chartData, includeDayOfWeek])
-
-  const getColor = (value: number) => {
-    const intensity = value / maxPlays
-    if (intensity < 0.2) return '#e3f2fd'
-    if (intensity < 0.4) return '#90caf9'
-    if (intensity < 0.6) return '#42a5f5'
-    if (intensity < 0.8) return '#1e88e5'
-    return '#1565c0'
-  }
 
   if (loading) {
     return <div className="loading">Loading hourly patterns...</div>
