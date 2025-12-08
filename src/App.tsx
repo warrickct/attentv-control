@@ -10,7 +10,8 @@ import TopAdsLeaderboard from './TopAdsLeaderboard'
 import DeviceComparisonChart from './DeviceComparisonChart'
 import ScreenshotGallery from './ScreenshotGallery'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+// Use relative URL in production (same origin), or explicit URL from env, or default to localhost for dev
+const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
 
 interface DeviceSummary {
   deviceId: string
