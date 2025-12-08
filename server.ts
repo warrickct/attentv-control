@@ -1167,12 +1167,14 @@ app.get('/api/screenshots', async (req, res) => {
 })
 
 // Serve React app for all non-API routes (production only)
+// This must be last, after all API routes and static file serving
 if (process.env.NODE_ENV === 'production') {
-  app.get('/*', (req, res) => {
-    // Don't serve index.html for API routes
+  app.use((req, res) => {
+    // Don't serve index.html for API routes (they should have been handled already)
     if (req.path.startsWith('/api/')) {
       return res.status(404).json({ error: 'Not found' })
     }
+    // Serve index.html for all other routes (SPA routing)
     res.sendFile(path.join(__dirname, 'dist', 'index.html'))
   })
 }
