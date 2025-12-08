@@ -17,7 +17,12 @@ const PORT = process.env.PORT || 3001
 const HOST = process.env.HOST || '0.0.0.0' // Bind to all interfaces for network access
 
 // Middleware
-app.use(cors())
+app.use(cors({
+  origin: true, // Allow all origins
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}))
 app.use(express.json())
 
 // Serve static files from dist directory in production
@@ -33,8 +38,9 @@ app.get('/favicon.ico', (req, res) => {
 })
 
 // Initialize AWS clients
-// Using attentv-terraform profile which has DynamoDB and S3 permissions
-const profileName = process.env.AWS_PROFILE || 'attentv-terraform'
+// Using iotdevice profile which has DynamoDB and S3 permissions
+// const profileName = process.env.AWS_PROFILE || 'attentv-terraform'  // Alternative profile
+const profileName = process.env.AWS_PROFILE || 'iotdevice'
 const region = process.env.AWS_REGION || 'ap-southeast-2'
 const awsCredentials = fromIni({ profile: profileName })
 
