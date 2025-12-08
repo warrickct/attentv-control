@@ -1160,7 +1160,7 @@ app.get('/api/screenshots', async (req, res) => {
 
 // Serve React app for all non-API routes (production only)
 if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
+  app.get('/*', (req, res) => {
     // Don't serve index.html for API routes
     if (req.path.startsWith('/api/')) {
       return res.status(404).json({ error: 'Not found' })
