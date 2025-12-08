@@ -10,8 +10,8 @@ module.exports = {
       NODE_ENV: 'production',
       PORT: 3001,
       HOST: '0.0.0.0',
-      AWS_PROFILE: 'attentv-terraform',
-      AWS_REGION: 'ap-southeast-2'
+      AWS_PROFILE: process.env.AWS_PROFILE || 'attentv-terraform',
+      AWS_REGION: process.env.AWS_REGION || 'ap-southeast-2'
     },
     error_file: './logs/err.log',
     out_file: './logs/out.log',
