@@ -27,6 +27,8 @@ if (process.env.NODE_ENV === 'production') {
 
 // Handle favicon requests to avoid CSP errors
 app.get('/favicon.ico', (req, res) => {
+  res.setHeader('Content-Type', 'image/x-icon')
+  res.setHeader('Cache-Control', 'public, max-age=31536000')
   res.status(204).end()
 })
 
