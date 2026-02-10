@@ -101,14 +101,21 @@ export default function DataLabelsGraph() {
   const dateRange = useMemo(() => {
     const now = new Date()
     let start: Date
-    const end = new Date(now)
+    let end: Date = new Date(now)
+
+    const isValidDate = (d: Date) => Number.isFinite(d.getTime())
 
     if (useCustomDateRange && customStartDate && customEndDate) {
-      start = new Date(customStartDate)
-      const endDate = new Date(customEndDate)
-      endDate.setHours(23, 59, 59, 999)
-      end.setTime(endDate.getTime())
-      start.setHours(0, 0, 0, 0)
+      const customStart = new Date(customStartDate)
+      const customEnd = new Date(customEndDate)
+      customEnd.setHours(23, 59, 59, 999)
+      customStart.setHours(0, 0, 0, 0)
+      if (isValidDate(customStart) && isValidDate(customEnd) && customStart <= customEnd) {
+        start = customStart
+        end = customEnd
+      } else {
+        start = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+      }
     } else {
       switch (range) {
         case '1h':
@@ -128,7 +135,8 @@ export default function DataLabelsGraph() {
             const sorted = [...rawData].sort((a, b) =>
               new Date(a.startTime).getTime() - new Date(b.startTime).getTime()
             )
-            start = new Date(sorted[0].startTime)
+            const firstStart = new Date(sorted[0].startTime)
+            start = isValidDate(firstStart) ? firstStart : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
           } else {
             start = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
           }
@@ -137,12 +145,15 @@ export default function DataLabelsGraph() {
           start = new Date(now.getTime() - 24 * 60 * 60 * 1000)
       }
     }
+    if (!isValidDate(start)) start = new Date(now.getTime() - 24 * 60 * 60 * 1000)
+    if (!isValidDate(end)) end = new Date(now)
     return { start, end }
   }, [range, rawData, useCustomDateRange, customStartDate, customEndDate])
 
   const filteredData = useMemo(() => {
     return rawData.filter(item => {
       const itemDate = new Date(item.startTime)
+      if (!Number.isFinite(itemDate.getTime())) return false
       if (itemDate < dateRange.start || itemDate > dateRange.end) return false
       if (excludeTest) {
         const isTest = item.is_test === true || item.is_test === 'true'
@@ -154,6 +165,7 @@ export default function DataLabelsGraph() {
 
   const bucketSize = useMemo(() => {
     const rangeMs = dateRange.end.getTime() - dateRange.start.getTime()
+    if (!Number.isFinite(rangeMs) || rangeMs <= 0) return 60 * 60 * 1000
     switch (granularity) {
       case 'minute':
         return 60 * 1000
