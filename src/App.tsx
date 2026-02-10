@@ -9,6 +9,7 @@ import WeekOverWeekChart from './WeekOverWeekChart'
 import TopAdsLeaderboard from './TopAdsLeaderboard'
 import DeviceComparisonChart from './DeviceComparisonChart'
 import ScreenshotGallery from './ScreenshotGallery'
+import DataLabelsGraph from './DataLabelsGraph'
 
 // Use relative URL in production (same origin), or explicit URL from env, or default to localhost for dev
 const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
@@ -30,7 +31,7 @@ interface AdAggregation {
   error?: string
 }
 
-type ViewMode = 'screenshots' | 'overview' | 'device'
+type ViewMode = 'screenshots' | 'overview' | 'device' | 'dataLabels'
 
 function App() {
   const [devices, setDevices] = useState<string[]>([])
@@ -244,6 +245,12 @@ function App() {
             >
               Device Details
             </button>
+            <button
+              className={`view-mode-tab ${viewMode === 'dataLabels' ? 'active' : ''}`}
+              onClick={() => setViewMode('dataLabels')}
+            >
+              Data Labels
+            </button>
           </div>
 
           {viewMode === 'screenshots' ? (
@@ -280,6 +287,11 @@ function App() {
                   </div>
                 </div>
               </div>
+            </div>
+          ) : viewMode === 'dataLabels' ? (
+            <div className="data-labels-content">
+              <h2>Data Labels (by channel)</h2>
+              <DataLabelsGraph />
             </div>
           ) : selectedDevice && (
             <div className="device-content">

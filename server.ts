@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import fs from 'fs'
 import path, { dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -59,6 +60,7 @@ const S3_BUCKET = 'attntv'
 const SCREENSHOT_BUCKET = process.env.NODE_ENV === 'production' 
   ? 'attentv-iot-screenshots-prod' 
   : 'attentv-iot-screenshots-dev'
+const DATA_LABELS_TABLE = process.env.DATA_LABELS_TABLE || 'data_labels'
 
 // Cache for device data (in-memory)
 interface CacheEntry<T> {
@@ -71,6 +73,7 @@ const AGGREGATE_CACHE_TTL = 60000 // 60 seconds for aggregate queries
 const deviceSummaryCache = new Map<string, CacheEntry<any>>()
 const deviceAdsCache = new Map<string, CacheEntry<any>>()
 const aggregateCache = new Map<string, CacheEntry<any>>()
+const dataLabelsChannelsCache = new Map<string, CacheEntry<string[]>>()
 
 // Helper to get cached data or null if expired
 function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string, ttl: number = CACHE_TTL): T | null {
@@ -145,6 +148,82 @@ app.get('/api/devices/:deviceId/ads', async (req, res) => {
     console.error('Error listing ads:', error)
     res.status(500).json({
       error: error.message || 'Failed to list ads',
+      code: error.name,
+    })
+  }
+})
+
+// --- Data Labels table (data_labels) ---
+// GET /api/data-labels/channels - list distinct channel values
+app.get('/api/data-labels/channels', async (req, res) => {
+  try {
+    const cacheKey = 'channels'
+    const cached = getCached(dataLabelsChannelsCache, cacheKey, 60000)
+    if (cached) return res.json({ channels: cached })
+
+    const items: any[] = []
+    let lastEvaluatedKey: any = undefined
+    const tableName = DATA_LABELS_TABLE
+
+    do {
+      const cmd = new ScanCommand({
+        TableName: tableName,
+        ProjectionExpression: '#ch',
+        ExpressionAttributeNames: { '#ch': 'channel' },
+        ExclusiveStartKey: lastEvaluatedKey,
+      })
+      const result = await docClient.send(cmd)
+      if (result.Items) items.push(...result.Items)
+      lastEvaluatedKey = result.LastEvaluatedKey
+    } while (lastEvaluatedKey)
+
+    const channels = [...new Set(items.map(i => String(i.channel ?? '')).filter(Boolean))].sort()
+    setCached(dataLabelsChannelsCache, cacheKey, channels)
+    res.json({ channels })
+  } catch (error: any) {
+    console.error('Error fetching data-labels channels:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch channels',
+      code: error.name,
+    })
+  }
+})
+
+// GET /api/data-labels?channel=9 - get items (optional channel filter)
+app.get('/api/data-labels', async (req, res) => {
+  try {
+    const channel = req.query.channel as string | undefined
+    const tableName = DATA_LABELS_TABLE
+    const maxItems = 50000
+    const items: any[] = []
+    let lastEvaluatedKey: any = undefined
+
+    do {
+      const scanParams: any = {
+        TableName: tableName,
+        ExclusiveStartKey: lastEvaluatedKey,
+        Limit: 1000,
+      }
+      if (channel !== undefined && channel !== '' && channel !== 'all') {
+        scanParams.FilterExpression = '#ch = :ch'
+        scanParams.ExpressionAttributeNames = { '#ch': 'channel' }
+        scanParams.ExpressionAttributeValues = { ':ch': channel }
+      }
+      const cmd = new ScanCommand(scanParams)
+      const result = await docClient.send(cmd)
+      if (result.Items) items.push(...result.Items)
+      lastEvaluatedKey = result.LastEvaluatedKey
+      if (items.length >= maxItems) break
+    } while (lastEvaluatedKey)
+
+    res.json({
+      items,
+      count: items.length,
+    })
+  } catch (error: any) {
+    console.error('Error fetching data-labels:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch data labels',
       code: error.name,
     })
   }
@@ -1169,13 +1248,18 @@ app.get('/api/screenshots', async (req, res) => {
 // Serve React app for all non-API routes (production only)
 // This must be last, after all API routes and static file serving
 if (process.env.NODE_ENV === 'production') {
+  const distIndex = path.join(__dirname, 'dist', 'index.html')
   app.use((req, res) => {
     // Don't serve index.html for API routes (they should have been handled already)
     if (req.path.startsWith('/api/')) {
       return res.status(404).json({ error: 'Not found' })
     }
-    // Serve index.html for all other routes (SPA routing)
-    res.sendFile(path.join(__dirname, 'dist', 'index.html'))
+    if (!fs.existsSync(distIndex)) {
+      return res.status(503).send(
+        'Frontend not built. Run: npm run build'
+      )
+    }
+    res.sendFile(distIndex)
   })
 }
 
