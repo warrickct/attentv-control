@@ -409,8 +409,8 @@ export default function DataLabelsGraph() {
                   const item = bucketedData.find((d) => d.time === value)
                   return item?.fullTime || value
                 }}
-                formatter={(value: number) => [
-                  aggregate === 'count' ? `${value} labels` : formatDuration(value),
+                formatter={(value: unknown) => [
+                  aggregate === 'count' ? `${Number(value) ?? 0} labels` : formatDuration(Number(value) ?? 0),
                   aggregate === 'count' ? 'Label count' : 'Duration',
                 ]}
               />

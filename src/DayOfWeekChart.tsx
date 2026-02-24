@@ -97,7 +97,7 @@ export default function DayOfWeekChart() {
           <XAxis dataKey="dayName" />
           <YAxis />
           <Tooltip 
-            formatter={(value: number) => [`${value} plays`, 'Plays']}
+            formatter={(value: unknown) => [`${Number(value) ?? 0} plays`, 'Plays']}
             labelFormatter={(label) => `Day: ${label}`}
           />
           <Bar dataKey="plays" fill="#1976d2">

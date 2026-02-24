@@ -489,9 +489,9 @@ export default function AdDurationGraph({ deviceId }: AdDurationGraphProps) {
                 const item = bucketedData.find(d => d.time === value)
                 return item?.fullTime || value
               }}
-              formatter={(value: any, name: string, props: any) => {
-                const item = props.payload
-                if (name === 'Total Duration') {
+              formatter={(value: any, name?: any, props?: any) => {
+                const item = props?.payload
+                if (String(name) === 'Total Duration') {
                   const avgDuration = item.totalPlays > 0 ? (value / item.totalPlays) : 0
                   const percentage = item.percentage || 0
                   return [

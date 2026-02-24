@@ -117,7 +117,7 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
           />
           <YAxis />
           <Tooltip 
-            formatter={(value: number) => [`${value} plays`, 'Plays']}
+            formatter={(value: unknown) => [`${Number(value) ?? 0} plays`, 'Plays']}
             labelFormatter={(label) => `Hour: ${label}`}
           />
           <Legend />

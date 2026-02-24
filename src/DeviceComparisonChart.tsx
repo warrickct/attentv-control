@@ -120,11 +120,11 @@ export default function DeviceComparisonChart() {
           <XAxis type="number" />
           <YAxis dataKey="name" type="category" width={80} />
           <Tooltip 
-            formatter={(value: number, name: string) => {
-              if (name === 'duration') {
-                return [`${formatDuration(value * 60)}`, 'Duration']
+            formatter={(value: unknown, name?: unknown) => {
+              if (String(name) === 'duration') {
+                return [`${formatDuration((Number(value) ?? 0) * 60)}`, 'Duration']
               }
-              return [value, name === 'plays' ? 'Total Plays' : 'Avg Plays/Day']
+              return [Number(value) ?? 0, String(name) === 'plays' ? 'Total Plays' : 'Avg Plays/Day']
             }}
           />
           <Legend />

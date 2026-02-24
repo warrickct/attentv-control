@@ -479,9 +479,9 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
                 const item = bucketedData.find(d => d.time === value)
                 return item?.fullTime || value
               }}
-              formatter={(value: any, name: string, props: any) => {
-                const item = props.payload
-                if (name === 'Total Plays') {
+              formatter={(value: any, name?: any, props?: any) => {
+                const item = props?.payload
+                if (String(name) === 'Total Plays') {
                   return [
                     <>
                       <div>{value} plays</div>
@@ -489,7 +489,7 @@ export default function AdPlayGraph({ deviceId }: AdPlayGraphProps) {
                         Total Duration: {formatDuration(item.totalDuration)}
                       </div>
                     </>,
-                    name
+                    String(name ?? '')
                   ]
                 }
                 // For individual ads, show count and duration
