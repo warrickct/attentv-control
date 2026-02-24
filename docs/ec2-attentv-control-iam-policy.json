@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DynamoDBTables",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:Scan",
+        "dynamodb:Query",
+        "dynamodb:GetItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:*:*:table/data_labels",
+        "arn:aws:dynamodb:*:*:table/attentv-ad-plays-prod",
+        "arn:aws:dynamodb:*:*:table/attentv-labelling-users"
+      ]
+    },
+    {
+      "Sid": "S3Buckets",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetObject"
+      ],
+      "Resource": [
+        "arn:aws:s3:::attntv",
+        "arn:aws:s3:::attntv/*",
+        "arn:aws:s3:::attentv-iot-screenshots-prod",
+        "arn:aws:s3:::attentv-iot-screenshots-prod/*",
+        "arn:aws:s3:::attentv-iot-screenshots-dev",
+        "arn:aws:s3:::attentv-iot-screenshots-dev/*"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useAuth } from './AuthContext'
+import Login from './Login'
 import './App.css'
+
+function LogoutButton() {
+  const { logout } = useAuth()
+  return (
+    <button type="button" className="logout-button" onClick={() => logout()}>
+      Sign out
+    </button>
+  )
+}
 import AdPlayGraph from './AdPlayGraph'
 import AdDurationGraph from './AdDurationGraph'
 import AggregateDashboard from './AggregateDashboard'
@@ -34,6 +45,7 @@ interface AdAggregation {
 type ViewMode = 'screenshots' | 'overview' | 'device' | 'dataLabels'
 
 function App() {
+  const { user, loading: authLoading } = useAuth()
   const [devices, setDevices] = useState<string[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>('screenshots')
@@ -46,7 +58,7 @@ function App() {
   // Fetch device list from S3
   const fetchDevices = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/devices`)
+      const response = await fetch(`${API_URL}/api/devices`, { credentials: 'include' })
       if (!response.ok) {
         throw new Error('Failed to fetch devices')
       }
@@ -67,7 +79,7 @@ function App() {
   const fetchDeviceSummary = useCallback(async (deviceId: string, forceRefresh = false) => {
     try {
       const url = `${API_URL}/api/stats/device/${deviceId}/summary${forceRefresh ? '?refresh=true' : ''}`
-      const response = await fetch(url)
+      const response = await fetch(url, { credentials: 'include' })
       if (!response.ok) {
         throw new Error(`Failed to fetch summary for ${deviceId}`)
       }
@@ -96,7 +108,7 @@ function App() {
     try {
       setLoading(true)
       const url = `${API_URL}/api/stats/device/${deviceId}/ads${forceRefresh ? '?refresh=true' : ''}`
-      const response = await fetch(url)
+      const response = await fetch(url, { credentials: 'include' })
       if (!response.ok) {
         throw new Error(`Failed to fetch ad aggregations for ${deviceId}`)
       }
@@ -201,11 +213,31 @@ function App() {
   const currentSummary = selectedDevice ? deviceSummaries[selectedDevice] : null
   const currentAds = selectedDevice ? adAggregations[selectedDevice] || [] : []
 
+  if (authLoading) {
+    return (
+      <div className="app" style={{ justifyContent: 'center', alignItems: 'center' }}>
+        <div className="loading">Checking sign-in…</div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return <Login />
+  }
+
   return (
     <div className="app">
       <header className="header">
-        <h1>Ad Play Statistics Dashboard</h1>
-        <p>Monitor ad play data by device from AWS DynamoDB</p>
+        <div className="header-top">
+          <div>
+            <h1>Ad Play Statistics Dashboard</h1>
+            <p>Monitor ad play data by device from AWS DynamoDB</p>
+          </div>
+          <div className="header-user">
+            <span className="header-username">{user.username}</span>
+            <LogoutButton />
+          </div>
+        </div>
       </header>
 
       {loadingDevices ? (

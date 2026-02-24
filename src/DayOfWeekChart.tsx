@@ -20,7 +20,7 @@ export default function DayOfWeekChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/aggregate/day-of-week`)
+        const response = await fetch(`${API_URL}/api/stats/aggregate/day-of-week`, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch day of week patterns')
         }

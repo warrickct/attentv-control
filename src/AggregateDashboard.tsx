@@ -28,7 +28,7 @@ export default function AggregateDashboard({ onRefresh }: AggregateDashboardProp
       setLoading(true)
       setError(null)
       const url = `${API_URL}/api/stats/aggregate/summary${forceRefresh ? '?refresh=true' : ''}`
-      const response = await fetch(url)
+      const response = await fetch(url, { credentials: 'include' })
       if (!response.ok) {
         throw new Error('Failed to fetch aggregate summary')
       }

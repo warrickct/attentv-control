@@ -22,6 +22,40 @@
   opacity: 0.9;
 }
 
+.header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.header-username {
+  font-size: 0.95rem;
+  opacity: 0.95;
+}
+
+.logout-button {
+  padding: 0.4rem 0.9rem;
+  background: rgba(255, 255, 255, 0.25);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.logout-button:hover {
+  background: rgba(255, 255, 255, 0.35);
+}
+
 .controls {
   max-width: 800px;
   margin: 0 auto 2rem;

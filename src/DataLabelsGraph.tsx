@@ -62,7 +62,7 @@ export default function DataLabelsGraph() {
     const fetchChannels = async () => {
       try {
         setLoadingChannels(true)
-        const res = await fetch(`${API_URL}/api/data-labels/channels`)
+        const res = await fetch(`${API_URL}/api/data-labels/channels`, { credentials: 'include' })
         if (!res.ok) throw new Error('Failed to fetch channels')
         const data = await res.json()
         setChannels(data.channels || [])
@@ -84,7 +84,7 @@ export default function DataLabelsGraph() {
         const url = selectedChannel && selectedChannel !== 'all'
           ? `${API_URL}/api/data-labels?channel=${encodeURIComponent(selectedChannel)}`
           : `${API_URL}/api/data-labels`
-        const res = await fetch(url)
+        const res = await fetch(url, { credentials: 'include' })
         if (!res.ok) throw new Error('Failed to fetch data labels')
         const data = await res.json()
         setRawData(data.items || [])

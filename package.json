@@ -21,14 +21,19 @@
     "pm2:status": "npx pm2 status",
     "pm2:save": "npx pm2 save",
     "pm2:startup": "npx pm2 startup",
-    "deploy": "npm run build && npm run pm2:start && npm run pm2:save"
+    "deploy": "npm run build && npm run pm2:start && npm run pm2:save",
+    "heroku-postbuild": "npm run build"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "bcrypt": "^5.1.1",
+    "cookie-parser": "^1.4.7",
+    "jsonwebtoken": "^9.0.2",
     "@aws-sdk/client-dynamodb": "^3.934.0",
     "@aws-sdk/client-s3": "^3.934.0",
+    "@aws-sdk/credential-provider-node": "^3.934.0",
     "@aws-sdk/credential-providers": "^3.934.0",
     "@aws-sdk/lib-dynamodb": "^3.934.0",
     "@aws-sdk/s3-request-presigner": "^3.946.0",
@@ -38,16 +43,19 @@
     "express": "^5.1.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "recharts": "^3.4.1"
+    "recharts": "^3.4.1",
+    "tsx": "^4.20.6"
   },
   "devDependencies": {
+    "@types/bcrypt": "^5.0.2",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^24.10.1",
     "@types/react": "^19.2.6",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.7.0",
     "concurrently": "^9.2.1",
     "pm2": "^5.3.1",
-    "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vite": "^5.4.21"
   }

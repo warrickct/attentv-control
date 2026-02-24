@@ -22,7 +22,7 @@ export default function DeviceComparisonChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/devices/comparison`)
+        const response = await fetch(`${API_URL}/api/stats/devices/comparison`, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch device comparison')
         }

@@ -31,7 +31,7 @@ export default function WeekOverWeekChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/aggregate/week-comparison`)
+        const response = await fetch(`${API_URL}/api/stats/aggregate/week-comparison`, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch week comparison')
         }

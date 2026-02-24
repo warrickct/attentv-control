@@ -85,7 +85,7 @@ export default function AdDurationGraph({ deviceId }: AdDurationGraphProps) {
       setLoading(true)
       setError(null)
       try {
-        const response = await fetch(`${API_URL}/api/stats/device/${deviceId}/timeseries`)
+        const response = await fetch(`${API_URL}/api/stats/device/${deviceId}/timeseries`, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch time series data')
         }

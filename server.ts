@@ -1,13 +1,17 @@
-import express from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import fs from 'fs'
 import path, { dirname } from 'path'
 import { fileURLToPath } from 'url'
+import jwt from 'jsonwebtoken'
+import bcrypt from 'bcrypt'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBDocumentClient, ScanCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb'
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { fromIni } from '@aws-sdk/credential-providers'
+import { defaultProvider } from '@aws-sdk/credential-provider-node'
 
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url)
@@ -25,6 +29,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }))
 app.use(express.json())
+app.use(cookieParser())
 
 // Serve static files from dist directory in production
 if (process.env.NODE_ENV === 'production') {
@@ -38,12 +43,11 @@ app.get('/favicon.ico', (req, res) => {
   res.status(204).end()
 })
 
-// Initialize AWS clients
-// Using iotdevice profile which has DynamoDB and S3 permissions
-// const profileName = process.env.AWS_PROFILE || 'attentv-terraform'  // Alternative profile
-const profileName = process.env.AWS_PROFILE || 'iotdevice'
+// Initialize AWS clients — profile from AWS_PROFILE env; if unset, uses default credential chain
 const region = process.env.AWS_REGION || 'ap-southeast-2'
-const awsCredentials = fromIni({ profile: profileName })
+const awsCredentials = process.env.AWS_PROFILE
+  ? fromIni({ profile: process.env.AWS_PROFILE })
+  : defaultProvider()
 
 const client = new DynamoDBClient({
   region,
@@ -61,6 +65,19 @@ const SCREENSHOT_BUCKET = process.env.NODE_ENV === 'production'
   ? 'attentv-iot-screenshots-prod' 
   : 'attentv-iot-screenshots-dev'
 const DATA_LABELS_TABLE = process.env.DATA_LABELS_TABLE || 'data_labels'
+const LABELLING_USERS_TABLE = process.env.LABELLING_USERS_TABLE || 'attentv-labelling-users'
+const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-production'
+const SESSION_COOKIE = 'attentv_session'
+const SESSION_MAX_AGE_DAYS = 7
+
+// Extend Express Request for auth
+declare global {
+  namespace Express {
+    interface Request {
+      user?: { username: string }
+    }
+  }
+}
 
 // Cache for device data (in-memory)
 interface CacheEntry<T> {
@@ -100,6 +117,89 @@ function setCached<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T): 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' })
+})
+
+// --- Auth: login against DynamoDB table attentv-labelling-users ---
+// Table is assumed to have partition key "username" and attribute "password" (bcrypt hash or plaintext).
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {}
+    if (!username || typeof password !== 'string') {
+      return res.status(400).json({ error: 'Username and password required' })
+    }
+    const getCmd = new GetCommand({
+      TableName: LABELLING_USERS_TABLE,
+      Key: { username: String(username).trim() },
+    })
+    const result = await docClient.send(getCmd)
+    const user = result.Item
+    if (!user || !user.password) {
+      return res.status(401).json({ error: 'Invalid username or password' })
+    }
+    const storedPassword = String(user.password)
+    const passwordMatch = storedPassword.startsWith('$2')
+      ? await bcrypt.compare(password, storedPassword)
+      : password === storedPassword
+    if (!passwordMatch) {
+      return res.status(401).json({ error: 'Invalid username or password' })
+    }
+    const token = jwt.sign(
+      { username: user.username, sub: user.username },
+      SESSION_SECRET,
+      { expiresIn: `${SESSION_MAX_AGE_DAYS}d` }
+    )
+    const isProduction = process.env.NODE_ENV === 'production'
+    res.cookie(SESSION_COOKIE, token, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: isProduction ? 'lax' : 'lax',
+      maxAge: SESSION_MAX_AGE_DAYS * 24 * 60 * 60 * 1000,
+      path: '/',
+    })
+    return res.json({ user: { username: user.username } })
+  } catch (err: any) {
+    console.error('Login error:', err)
+    return res.status(500).json({ error: 'Login failed' })
+  }
+})
+
+app.get('/api/auth/me', (req, res) => {
+  const token = req.cookies?.[SESSION_COOKIE]
+  if (!token) return res.status(401).json({ error: 'Not authenticated' })
+  try {
+    const payload = jwt.verify(token, SESSION_SECRET) as { username?: string }
+    if (!payload.username) return res.status(401).json({ error: 'Not authenticated' })
+    return res.json({ user: { username: payload.username } })
+  } catch {
+    return res.status(401).json({ error: 'Not authenticated' })
+  }
+})
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(SESSION_COOKIE, { path: '/' })
+  return res.json({ ok: true })
+})
+
+// Require auth for all /api/* except login and logout
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const token = req.cookies?.[SESSION_COOKIE]
+  if (!token) {
+    return res.status(401).json({ error: 'Not authenticated' })
+  }
+  try {
+    const payload = jwt.verify(token, SESSION_SECRET) as { username?: string }
+    if (!payload.username) return res.status(401).json({ error: 'Not authenticated' })
+    req.user = { username: payload.username }
+    next()
+  } catch {
+    return res.status(401).json({ error: 'Not authenticated' })
+  }
+}
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/login' && req.method === 'POST') return next()
+  if (req.path === '/auth/logout' && req.method === 'POST') return next()
+  return requireAuth(req, res, next)
 })
 
 // Get list of devices from S3 bucket (folder names)

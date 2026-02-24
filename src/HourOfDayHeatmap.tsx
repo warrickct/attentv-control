@@ -25,7 +25,7 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
         setLoading(true)
         setError(null)
         const url = `${API_URL}/api/stats/aggregate/hourly-patterns?dayOfWeek=${includeDayOfWeek}`
-        const response = await fetch(url)
+        const response = await fetch(url, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch hourly patterns')
         }

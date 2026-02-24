@@ -21,7 +21,7 @@ export default function ScreenshotGallery() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/screenshots`)
+        const response = await fetch(`${API_URL}/api/screenshots`, { credentials: 'include' })
         if (!response.ok) {
           throw new Error('Failed to fetch screenshots')
         }
