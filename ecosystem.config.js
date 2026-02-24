@@ -10,7 +10,7 @@ module.exports = {
       NODE_ENV: 'production',
       PORT: 3001,
       HOST: '0.0.0.0',
-      AWS_PROFILE: process.env.AWS_PROFILE || 'iotdevice',  // Alternative: 'attentv-terraform'
+      ...(process.env.AWS_PROFILE && { AWS_PROFILE: process.env.AWS_PROFILE }),
       AWS_REGION: process.env.AWS_REGION || 'ap-southeast-2'
     },
     error_file: './logs/err.log',
