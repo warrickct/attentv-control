@@ -22,8 +22,7 @@ import DeviceComparisonChart from './DeviceComparisonChart'
 import ScreenshotGallery from './ScreenshotGallery'
 import DataLabelsGraph from './DataLabelsGraph'
 
-// Use relative URL in production (same origin), or explicit URL from env, or default to localhost for dev
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL } from './api'
 
 interface DeviceSummary {
   deviceId: string
