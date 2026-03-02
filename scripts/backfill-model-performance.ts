@@ -100,10 +100,19 @@ function parseBoolean(value: unknown, defaultValue: boolean = false): boolean {
 }
 
 function getCloudSqlAuth(): GoogleAuth | undefined {
-  const credentialsJson =
+  const inlineCredentialsJson =
     process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON ||
     process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON ||
     process.env.GCP_SERVICE_ACCOUNT_JSON
+
+  const credentialsJson = inlineCredentialsJson ||
+    (() => {
+      const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS
+      if (!credentialsPath || !fs.existsSync(credentialsPath)) {
+        return null
+      }
+      return fs.readFileSync(credentialsPath, 'utf8')
+    })()
 
   if (!credentialsJson) {
     return undefined

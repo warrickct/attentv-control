@@ -46,6 +46,9 @@ Supported environment variables:
 If `INSTANCE_CONNECTION_NAME` is set, the backend uses the Cloud SQL Node connector.
 Otherwise it falls back to `DATABASE_URL` or direct `PG*`/`MODEL_PERFORMANCE_DB_*` Postgres settings.
 
+Local development can use `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service-account JSON file on disk.
+Serverless environments such as Netlify should use `GOOGLE_APPLICATION_CREDENTIALS_JSON` instead, because they cannot read a local file path from the developer machine.
+
 Important for Netlify:
 
 - local development can work with Application Default Credentials on the machine

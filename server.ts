@@ -13,11 +13,17 @@ import { registerAuthRoutes } from './server/auth'
 import { requireSession } from './server/session'
 import { registerModelPerformanceRoutes } from './server/modelPerformance'
 
-// Get __dirname equivalent for ES modules
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = dirname(__filename)
+function resolveRuntimeDirname(): string {
+  if (typeof __dirname !== 'undefined') {
+    return __dirname
+  }
 
-loadLocalEnv(__dirname)
+  return dirname(fileURLToPath(import.meta.url))
+}
+
+const runtimeDir = resolveRuntimeDirname()
+
+loadLocalEnv(runtimeDir)
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -34,7 +40,7 @@ app.use(express.json())
 
 // Serve static files from dist directory in production
 if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, 'dist')))
+  app.use(express.static(path.join(runtimeDir, 'dist')))
 }
 
 // Handle favicon requests to avoid CSP errors
