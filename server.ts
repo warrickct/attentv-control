@@ -124,7 +124,7 @@ function setCached<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T): 
 }
 
 // Health check endpoint
-app.get('/health', (req, res) => {
+app.get(['/health', '/api/health'], (req, res) => {
   res.json({ status: 'ok' })
 })
 

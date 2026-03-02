@@ -1325,6 +1325,43 @@
   height: 42px;
 }
 
+.detail-search-field {
+  min-width: min(420px, 100%);
+}
+
+.detail-search-field .control-select {
+  min-width: 100%;
+}
+
+.model-detail-scope-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: #f8f9fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  margin-bottom: 1rem;
+}
+
+.model-detail-scope-card h3 {
+  color: #333;
+  margin-bottom: 0.35rem;
+}
+
+.model-detail-scope-card p {
+  color: #666;
+}
+
+.model-detail-scope-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  color: #555;
+  font-size: 0.9rem;
+  word-break: break-word;
+}
+
 .model-timeline-card {
   background: #f8f9fa;
   border-radius: 12px;
@@ -1447,6 +1484,10 @@
   .model-window-header,
   .timeline-lane {
     grid-template-columns: 1fr;
+  }
+
+  .model-detail-scope-card {
+    flex-direction: column;
   }
 
   .timeline-axis {

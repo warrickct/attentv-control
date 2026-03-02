@@ -26,6 +26,12 @@ export const TREND_BUCKETS = [
   { key: '1d', label: 'Daily' },
 ] as const
 
+export const DETAIL_SCOPES = [
+  { key: 'day', label: 'Day' },
+  { key: 'range', label: 'Date range' },
+  { key: 'recording', label: 'Recording / WAV' },
+] as const
+
 export const METRIC_KEYS = [
   'recallBySeconds',
   'precisionBySeconds',
@@ -52,6 +58,7 @@ const MIN_MODEL_SECONDS = 30
 export type ShortTermWindowKey = (typeof SHORT_TERM_WINDOWS)[number]['key']
 export type TrendRangeKey = (typeof TREND_RANGES)[number]['key']
 export type TrendBucketKey = (typeof TREND_BUCKETS)[number]['key']
+export type DetailScopeType = (typeof DETAIL_SCOPES)[number]['key']
 export type PerformanceMetricKey = (typeof METRIC_KEYS)[number]
 export type AlertSeverity = 'info' | 'warning' | 'critical'
 
@@ -227,6 +234,35 @@ export interface ChannelBreakdownResponse {
   channels: ChannelBreakdownRow[]
 }
 
+export interface DetailScopeSummary {
+  type: DetailScopeType
+  label: string
+  windowStart: string
+  windowEnd: string
+  day?: string
+  start?: string
+  end?: string
+  recordingName?: string
+  lookupValue?: string
+  audioPath?: string | null
+  recordingStartedAt?: string | null
+  windowSeconds?: number | null
+}
+
+export interface RecordingBreakdownRow {
+  recordingName: string
+  channel: string
+  audioPath: string | null
+  recordingStartedAt: string | null
+  totalBreaks: number
+  matchedBreaks: number
+  truthSeconds: number
+  overlapSeconds: number
+  recallBySeconds: number
+  firstTruthStartMs: number
+  lastTruthEndMs: number
+}
+
 export interface BreakdownGroup {
   label: string
   truthSeconds: number
@@ -242,13 +278,14 @@ export interface ChannelDetailResponse {
   generatedAt: string
   timezone: string
   channel: string
-  day: string
+  scope: DetailScopeSummary
   summary: PerformanceMetrics
   groundTruthIntervals: TruthInterval[]
   modelIntervals: ModelInterval[]
   breakComparisons: BreakComparison[]
   hourOfDay: BreakdownGroup[]
   durationBuckets: BreakdownGroup[]
+  recordings: RecordingBreakdownRow[]
 }
 
 export function clipInterval<T extends Interval>(interval: T, windowStartMs: number, windowEndMs: number): T | null {
@@ -838,6 +875,16 @@ export function durationBucketFor(seconds: number): string {
   )
 }
 
+export function normalizeRecordingLookupValue(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return ''
+  }
+
+  const basename = trimmed.replace(/\\/g, '/').split('/').pop() ?? trimmed
+  return basename.replace(/\.wav$/i, '.ts')
+}
+
 export function buildDurationBreakdown(breakComparisons: ReadonlyArray<BreakComparison>): BreakdownGroup[] {
   return DURATION_BUCKETS.map((bucket) => {
     const comparisons = breakComparisons.filter((comparison) => durationBucketFor(comparison.truthDurationSec) === bucket.key)
@@ -859,6 +906,53 @@ export function buildDurationBreakdown(breakComparisons: ReadonlyArray<BreakComp
       ) ?? 0,
     }
   })
+}
+
+export function buildRecordingBreakdown(
+  truthIntervals: ReadonlyArray<TruthInterval>,
+  breakComparisons: ReadonlyArray<BreakComparison>,
+): RecordingBreakdownRow[] {
+  const truthByRecording = new Map<string, TruthInterval[]>()
+  for (const truthInterval of truthIntervals) {
+    const recordingName = String(truthInterval.metadata.recordingName)
+    const list = truthByRecording.get(recordingName) ?? []
+    list.push(truthInterval)
+    truthByRecording.set(recordingName, list)
+  }
+
+  const comparisonsByRecording = new Map<string, BreakComparison[]>()
+  for (const comparison of breakComparisons) {
+    const list = comparisonsByRecording.get(comparison.recordingName) ?? []
+    list.push(comparison)
+    comparisonsByRecording.set(comparison.recordingName, list)
+  }
+
+  return Array.from(truthByRecording.entries())
+    .map(([recordingName, intervals]) => {
+      const comparisons = comparisonsByRecording.get(recordingName) ?? []
+      const matchedBreaks = comparisons.filter((comparison) => comparison.overlapSec > 0).length
+      const truthSeconds = intervals.reduce((total, interval) => total + Math.max(0, interval.endMs - interval.startMs) / 1000, 0)
+      const overlapSeconds = comparisons.reduce((total, comparison) => total + comparison.overlapSec, 0)
+      const earliestTruthStartMs = Math.min(...intervals.map((interval) => interval.startMs))
+      const latestTruthEndMs = Math.max(...intervals.map((interval) => interval.endMs))
+      const firstInterval = [...intervals].sort((left, right) => left.startMs - right.startMs)[0]
+
+      return {
+        recordingName,
+        channel: String(firstInterval.metadata.channel),
+        audioPath: typeof firstInterval.metadata.audioPath === 'string' ? firstInterval.metadata.audioPath : null,
+        recordingStartedAt:
+          typeof firstInterval.metadata.recordingStartedAt === 'string' ? firstInterval.metadata.recordingStartedAt : null,
+        totalBreaks: intervals.length,
+        matchedBreaks,
+        truthSeconds: roundNumber(truthSeconds, 4) ?? 0,
+        overlapSeconds: roundNumber(overlapSeconds, 4) ?? 0,
+        recallBySeconds: roundNumber(percent(overlapSeconds, truthSeconds), 6) ?? 0,
+        firstTruthStartMs: earliestTruthStartMs,
+        lastTruthEndMs: latestTruthEndMs,
+      }
+    })
+    .sort((left, right) => left.firstTruthStartMs - right.firstTruthStartMs)
 }
 
 export function summarizeWindowComparisons(params: {

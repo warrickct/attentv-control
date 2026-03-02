@@ -11,6 +11,7 @@ import {
 import type {
   ChannelBreakdownResponse,
   ChannelDetailResponse,
+  DetailScopeType,
   OverviewResponse,
   PerformanceAlert,
   ShortTermWindowKey,
@@ -19,13 +20,13 @@ import type {
   TrendsResponse,
 } from '../shared/modelPerformance'
 import {
+  DETAIL_SCOPES,
   SHORT_TERM_WINDOWS,
   TREND_BUCKETS,
   TREND_RANGES,
 } from '../shared/modelPerformance'
 import {
   DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
-  dayWindow,
   getTimeZoneDateParts,
 } from '../shared/timezone'
 import { API_URL, apiFetch } from './api'
@@ -351,8 +352,13 @@ export default function ModelPerformanceDashboard() {
   const [customStartDate, setCustomStartDate] = useState<string>('')
   const [customEndDate, setCustomEndDate] = useState<string>('')
   const [shortWindow, setShortWindow] = useState<ShortTermWindowKey>('1h')
+  const [detailScope, setDetailScope] = useState<DetailScopeType>('day')
   const [detailChannel, setDetailChannel] = useState<string | null>(null)
   const [detailDay, setDetailDay] = useState<string>(getTodayInTimeZone(DEFAULT_MODEL_PERFORMANCE_TIMEZONE))
+  const [detailStartDate, setDetailStartDate] = useState<string>(getTodayInTimeZone(DEFAULT_MODEL_PERFORMANCE_TIMEZONE))
+  const [detailEndDate, setDetailEndDate] = useState<string>(getTodayInTimeZone(DEFAULT_MODEL_PERFORMANCE_TIMEZONE))
+  const [detailRecordingInput, setDetailRecordingInput] = useState<string>('')
+  const [detailWindowSeconds, setDetailWindowSeconds] = useState<number>(1800)
   const [overview, setOverview] = useState<OverviewResponse | null>(null)
   const [trends, setTrends] = useState<TrendsResponse | null>(null)
   const [channelBreakdown, setChannelBreakdown] = useState<ChannelBreakdownResponse | null>(null)
@@ -378,6 +384,8 @@ export default function ModelPerformanceDashboard() {
         setChannels(data.channels || [])
         setTimezone(resolvedTimeZone)
         setDetailDay((currentValue) => currentValue || getTodayInTimeZone(resolvedTimeZone))
+        setDetailStartDate((currentValue) => currentValue || getTodayInTimeZone(resolvedTimeZone))
+        setDetailEndDate((currentValue) => currentValue || getTodayInTimeZone(resolvedTimeZone))
       } catch (err: any) {
         setError(err.message || 'Failed to fetch model performance filters')
       } finally {
@@ -398,7 +406,13 @@ export default function ModelPerformanceDashboard() {
     if (!detailDay) {
       setDetailDay(getTodayInTimeZone(timezone))
     }
-  }, [detailDay, timezone])
+    if (!detailStartDate) {
+      setDetailStartDate(getTodayInTimeZone(timezone))
+    }
+    if (!detailEndDate) {
+      setDetailEndDate(getTodayInTimeZone(timezone))
+    }
+  }, [detailDay, detailEndDate, detailStartDate, timezone])
 
   useEffect(() => {
     const fetchOverview = async () => {
@@ -486,7 +500,16 @@ export default function ModelPerformanceDashboard() {
   }, [timezone, shortWindow, refreshIndex])
 
   useEffect(() => {
-    if (!detailChannel) {
+    if (detailScope !== 'recording' && !detailChannel) {
+      return
+    }
+
+    if (detailScope === 'range' && (!detailStartDate || !detailEndDate)) {
+      return
+    }
+
+    if (detailScope === 'recording' && !detailRecordingInput.trim()) {
+      setChannelDetail(null)
       return
     }
 
@@ -496,14 +519,26 @@ export default function ModelPerformanceDashboard() {
         setError(null)
         const params = new URLSearchParams({
           timezone,
-          day: detailDay,
+          scope: detailScope,
           refresh: refreshIndex > 0 ? 'true' : 'false',
         })
+        if (detailScope === 'day') {
+          params.set('channel', detailChannel ?? 'all')
+          params.set('day', detailDay)
+        } else if (detailScope === 'range') {
+          params.set('channel', detailChannel ?? 'all')
+          params.set('start', detailStartDate)
+          params.set('end', detailEndDate)
+        } else {
+          params.set('recording', detailRecordingInput.trim())
+          params.set('windowSeconds', String(detailWindowSeconds))
+        }
         const response = await apiFetch(
-          `${API_URL}/api/model-performance/channels/${encodeURIComponent(detailChannel)}/day?${params.toString()}`,
+          `${API_URL}/api/model-performance/detail?${params.toString()}`,
         )
         if (!response.ok) {
-          throw new Error('Failed to fetch channel detail')
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Failed to fetch channel detail')
         }
         const data = await response.json()
         setChannelDetail(data)
@@ -515,7 +550,17 @@ export default function ModelPerformanceDashboard() {
     }
 
     fetchDetail()
-  }, [detailChannel, detailDay, timezone, refreshIndex])
+  }, [
+    detailChannel,
+    detailDay,
+    detailEndDate,
+    detailRecordingInput,
+    detailScope,
+    detailStartDate,
+    detailWindowSeconds,
+    timezone,
+    refreshIndex,
+  ])
 
   useEffect(() => {
     if (!detailChannel && channelBreakdown && channelBreakdown.channels.length > 0) {
@@ -538,17 +583,20 @@ export default function ModelPerformanceDashboard() {
   )
 
   const selectedBreakdownRow = useMemo(
-    () => channelBreakdown?.channels.find((row) => row.channel === detailChannel) ?? null,
-    [channelBreakdown, detailChannel],
+    () => channelBreakdown?.channels.find((row) => row.channel === (channelDetail?.channel ?? detailChannel)) ?? null,
+    [channelBreakdown, channelDetail?.channel, detailChannel],
   )
 
   const detailWindow = useMemo(() => {
-    if (!detailDay) {
+    if (!channelDetail) {
       return null
     }
 
-    return dayWindow(detailDay, timezone)
-  }, [detailDay, timezone])
+    return {
+      startMs: new Date(channelDetail.scope.windowStart).getTime(),
+      endMs: new Date(channelDetail.scope.windowEnd).getTime(),
+    }
+  }, [channelDetail])
 
   if (loadingFilters) {
     return <div className="loading">Loading model performance filters...</div>
@@ -759,8 +807,9 @@ export default function ModelPerformanceDashboard() {
                 {channelBreakdown.channels.map((row) => (
                   <tr
                     key={row.channel}
-                    className={detailChannel === row.channel ? 'selected-channel-row' : ''}
+                    className={(channelDetail?.channel ?? detailChannel) === row.channel ? 'selected-channel-row' : ''}
                     onClick={() => {
+                      setDetailScope('day')
                       setDetailChannel(row.channel)
                       setSelectedChannel(row.channel)
                     }}
@@ -811,44 +860,131 @@ export default function ModelPerformanceDashboard() {
       <div className="insights-section">
         <div className="leaderboard-header">
           <div>
-            <h2>Channel Detail</h2>
+            <h2>Detail Inspector</h2>
             <p className="model-performance-subtitle">
-              Inspect raw per-break matches, latency, and interval overlap for a single broadcast day.
+              Inspect day-level, multi-day, or recording-specific overlap using the same comparison logic as the backend job.
             </p>
           </div>
           <div className="leaderboard-controls">
             <label>
-              Channel
+              Scope
               <select
                 className="control-select"
-                value={detailChannel ?? ''}
-                onChange={(event) => setDetailChannel(event.target.value)}
+                value={detailScope}
+                onChange={(event) => setDetailScope(event.target.value as DetailScopeType)}
               >
-                {channels.map((channel) => (
-                  <option key={channel} value={channel}>
-                    Channel {channel}
+                {DETAIL_SCOPES.map((scope) => (
+                  <option key={scope.key} value={scope.key}>
+                    {scope.label}
                   </option>
                 ))}
               </select>
             </label>
-            <label>
-              Day
-              <input
-                className="control-select"
-                type="date"
-                value={detailDay}
-                onChange={(event) => setDetailDay(event.target.value)}
-              />
-            </label>
+            {detailScope !== 'recording' && (
+              <label>
+                Channel
+                <select
+                  className="control-select"
+                  value={detailChannel ?? ''}
+                  onChange={(event) => setDetailChannel(event.target.value)}
+                >
+                  {channels.map((channel) => (
+                    <option key={channel} value={channel}>
+                      Channel {channel}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {detailScope === 'day' && (
+              <label>
+                Day
+                <input
+                  className="control-select"
+                  type="date"
+                  value={detailDay}
+                  onChange={(event) => setDetailDay(event.target.value)}
+                />
+              </label>
+            )}
+            {detailScope === 'range' && (
+              <>
+                <label>
+                  Start
+                  <input
+                    className="control-select"
+                    type="date"
+                    value={detailStartDate}
+                    onChange={(event) => setDetailStartDate(event.target.value)}
+                  />
+                </label>
+                <label>
+                  End
+                  <input
+                    className="control-select"
+                    type="date"
+                    value={detailEndDate}
+                    onChange={(event) => setDetailEndDate(event.target.value)}
+                  />
+                </label>
+              </>
+            )}
+            {detailScope === 'recording' && (
+              <>
+                <label className="detail-search-field">
+                  Recording or WAV path
+                  <input
+                    className="control-select"
+                    type="text"
+                    placeholder="ch95_20260302_141553.ts or /path/to/file.wav"
+                    value={detailRecordingInput}
+                    onChange={(event) => setDetailRecordingInput(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Window seconds
+                  <input
+                    className="control-select"
+                    type="number"
+                    min={60}
+                    step={60}
+                    value={detailWindowSeconds}
+                    onChange={(event) => {
+                      const nextValue = Number.parseInt(event.target.value || '1800', 10)
+                      setDetailWindowSeconds(Number.isFinite(nextValue) ? nextValue : 1800)
+                    }}
+                  />
+                </label>
+              </>
+            )}
           </div>
         </div>
 
         {loadingDetail ? (
           <div className="loading model-loading">Loading channel detail...</div>
         ) : !channelDetail || !detailWindow ? (
-          <div className="empty-state">Select a channel and day to inspect detail.</div>
+          <div className="empty-state">
+            {detailScope === 'recording'
+              ? 'Enter a recording name or WAV path to inspect detail.'
+              : 'Select a channel and scope to inspect detail.'}
+          </div>
         ) : (
           <>
+            <div className="model-detail-scope-card">
+              <div>
+                <h3>{channelDetail.scope.label}</h3>
+                <p>
+                  Channel {channelDetail.channel} • {formatDateTime(channelDetail.scope.windowStart, timezone)} to{' '}
+                  {formatDateTime(channelDetail.scope.windowEnd, timezone)}
+                </p>
+              </div>
+              <div className="model-detail-scope-meta">
+                <span>{channelDetail.scope.type}</span>
+                {channelDetail.scope.audioPath && <span>{channelDetail.scope.audioPath}</span>}
+                {channelDetail.scope.windowSeconds ? <span>{channelDetail.scope.windowSeconds}s window</span> : null}
+              </div>
+            </div>
+
             <div className="summary-cards">
               <div className="summary-card">
                 <div className="summary-label">Recall</div>
@@ -875,22 +1011,22 @@ export default function ModelPerformanceDashboard() {
               <TimelineLane
                 label="Ground truth"
                 intervals={channelDetail.groundTruthIntervals}
-                rangeStartMs={detailWindow.start.getTime()}
-                rangeEndMs={detailWindow.end.getTime()}
+                rangeStartMs={detailWindow.startMs}
+                rangeEndMs={detailWindow.endMs}
                 colorClass="truth"
                 timeZone={timezone}
               />
               <TimelineLane
                 label="Model"
                 intervals={channelDetail.modelIntervals}
-                rangeStartMs={detailWindow.start.getTime()}
-                rangeEndMs={detailWindow.end.getTime()}
+                rangeStartMs={detailWindow.startMs}
+                rangeEndMs={detailWindow.endMs}
                 colorClass="model"
                 timeZone={timezone}
               />
               <TimelineAxis
-                rangeStartMs={detailWindow.start.getTime()}
-                rangeEndMs={detailWindow.end.getTime()}
+                rangeStartMs={detailWindow.startMs}
+                rangeEndMs={detailWindow.endMs}
                 timeZone={timezone}
               />
             </div>
@@ -946,6 +1082,38 @@ export default function ModelPerformanceDashboard() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </div>
+
+            <div className="ads-section">
+              <h2>Recording / File Breakdown</h2>
+              <div className="ads-table-container">
+                <table className="ads-table compact-table">
+                  <thead>
+                    <tr>
+                      <th>Recording</th>
+                      <th>Started</th>
+                      <th>Breaks</th>
+                      <th>Matched</th>
+                      <th>Recall</th>
+                      <th>Truth Seconds</th>
+                      <th>Overlap</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {channelDetail.recordings.map((recording) => (
+                      <tr key={recording.recordingName}>
+                        <td>{recording.recordingName}</td>
+                        <td>{formatDateTime(recording.recordingStartedAt ?? recording.firstTruthStartMs, timezone)}</td>
+                        <td>{recording.totalBreaks}</td>
+                        <td>{recording.matchedBreaks}</td>
+                        <td>{formatPercent(recording.recallBySeconds)}</td>
+                        <td>{formatSeconds(recording.truthSeconds)}</td>
+                        <td>{formatSeconds(recording.overlapSeconds)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </div>
 

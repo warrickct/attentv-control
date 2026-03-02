@@ -2,12 +2,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   buildBreakComparisons,
+  buildRecordingBreakdown,
   clipInterval,
   computePerformanceMetrics,
   createBaselineSummary,
   evaluateAlerts,
   intersectionSeconds,
   mergeRanges,
+  normalizeRecordingLookupValue,
   overlapSeconds,
   type ModelInterval,
   type PerformanceMetrics,
@@ -180,4 +182,68 @@ test('integration path computes metrics from truth breaks and normalized model i
   assertAlmostEqual(metrics.recallBySeconds, 43 / 60)
   assertAlmostEqual(metrics.precisionBySeconds, 43 / 48)
   assert.equal(metrics.falsePositiveSeconds, 5)
+})
+
+test('normalizeRecordingLookupValue converts wav paths to recording names', () => {
+  assert.equal(
+    normalizeRecordingLookupValue('/tmp/audio/ch95_20260302_141553.wav'),
+    'ch95_20260302_141553.ts',
+  )
+  assert.equal(
+    normalizeRecordingLookupValue('C:\\recordings\\ch7_20251023_010203.WAV'),
+    'ch7_20251023_010203.ts',
+  )
+  assert.equal(
+    normalizeRecordingLookupValue('ch9_20251023_010203.ts'),
+    'ch9_20251023_010203.ts',
+  )
+})
+
+test('buildRecordingBreakdown groups multi-recording detail windows by source file', () => {
+  const truthIntervals: TruthInterval[] = [
+    {
+      ...makeTruthInterval('truth-1', '9', 0, 30_000, 1),
+      metadata: {
+        channel: '9',
+        recordingName: 'ch9_20251023_010203.ts',
+        breakNumber: 1,
+        audioPath: '/recordings/ch9_20251023_010203.wav',
+        recordingStartedAt: '2025-10-23T01:02:03.000Z',
+      },
+    },
+    {
+      ...makeTruthInterval('truth-2', '9', 60_000, 90_000, 2),
+      metadata: {
+        channel: '9',
+        recordingName: 'ch9_20251023_010203.ts',
+        breakNumber: 2,
+        audioPath: '/recordings/ch9_20251023_010203.wav',
+        recordingStartedAt: '2025-10-23T01:02:03.000Z',
+      },
+    },
+    {
+      ...makeTruthInterval('truth-3', '9', 120_000, 180_000, 1),
+      metadata: {
+        channel: '9',
+        recordingName: 'ch9_20251024_020304.ts',
+        breakNumber: 1,
+        audioPath: '/recordings/ch9_20251024_020304.wav',
+        recordingStartedAt: '2025-10-24T02:03:04.000Z',
+      },
+    },
+  ]
+  const modelIntervals = [
+    makeModelInterval('model-1', '9', 5_000, 20_000),
+    makeModelInterval('model-2', '9', 130_000, 150_000),
+  ]
+
+  const breakComparisons = buildBreakComparisons(truthIntervals, modelIntervals)
+  const recordings = buildRecordingBreakdown(truthIntervals, breakComparisons)
+
+  assert.equal(recordings.length, 2)
+  assert.equal(recordings[0].recordingName, 'ch9_20251023_010203.ts')
+  assert.equal(recordings[0].totalBreaks, 2)
+  assert.equal(recordings[0].matchedBreaks, 1)
+  assert.equal(recordings[1].recordingName, 'ch9_20251024_020304.ts')
+  assert.equal(recordings[1].matchedBreaks, 1)
 })

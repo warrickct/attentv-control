@@ -11,6 +11,7 @@ import {
   type ChannelBreakdownResponse,
   type ChannelBreakdownRow,
   type ChannelDetailResponse,
+  type DetailScopeType,
   type ModelInterval,
   type OverviewResponse,
   type OverviewWindowSummary,
@@ -22,13 +23,16 @@ import {
   type TrendsResponse,
   type TruthInterval,
   SHORT_TERM_WINDOWS,
+  buildRecordingBreakdown,
   buildBreakComparisons,
   buildDurationBreakdown,
   buildHourOfDayBreakdown,
   buildTrendPoints,
+  clipInterval,
   computePerformanceMetrics,
   createBaselineSummary,
   emptyPerformanceMetrics,
+  normalizeRecordingLookupValue,
   summarizeWindowComparisons,
 } from '../shared/modelPerformance'
 import {
@@ -60,6 +64,17 @@ interface WindowData {
   modelIntervals: ModelInterval[]
   breakComparisons: BreakComparison[]
   metrics: PerformanceMetrics
+}
+
+interface RecordingInspectionScope {
+  channel: string
+  normalizedRecordingName: string
+  lookupValue: string
+  audioPath: string | null
+  recordingStartedAt: string | null
+  windowStartMs: number
+  windowEndMs: number
+  truthIntervals: TruthInterval[]
 }
 
 interface CacheEntry<T> {
@@ -637,6 +652,29 @@ async function loadModelIntervals(params: {
   return fetchModelIntervalsFromDynamo(params)
 }
 
+function createWindowData(
+  truthIntervals: TruthInterval[],
+  modelIntervals: ModelInterval[],
+  windowStartMs: number,
+  windowEndMs: number,
+): WindowData {
+  const breakComparisons = buildBreakComparisons(truthIntervals, modelIntervals)
+  const metrics = computePerformanceMetrics(
+    truthIntervals,
+    modelIntervals,
+    breakComparisons,
+    windowStartMs,
+    windowEndMs,
+  )
+
+  return {
+    truthIntervals,
+    modelIntervals,
+    breakComparisons,
+    metrics,
+  }
+}
+
 async function loadWindowData(params: {
   docClient: DynamoDBDocumentClient
   dataLabelsTable: string
@@ -656,21 +694,12 @@ async function loadWindowData(params: {
     loadModelIntervals(params),
   ])
 
-  const breakComparisons = buildBreakComparisons(truthIntervals, modelIntervals)
-  const metrics = computePerformanceMetrics(
+  const windowData = createWindowData(
     truthIntervals,
     modelIntervals,
-    breakComparisons,
     params.windowStartMs,
     params.windowEndMs,
   )
-
-  const windowData = {
-    truthIntervals,
-    modelIntervals,
-    breakComparisons,
-    metrics,
-  }
   setCached(cacheKey, windowData)
   return windowData
 }
@@ -756,6 +785,104 @@ function getRangeBounds(
   return {
     rangeStartMs: now - range,
     rangeEndMs: now,
+  }
+}
+
+function getExplicitRangeBounds(
+  startParam: string,
+  endParam: string,
+  timeZone: string,
+): { rangeStartMs: number; rangeEndMs: number } {
+  const start = parseTimestampInTimeZone(startParam, timeZone)
+  const end = /^\d{4}-\d{2}-\d{2}$/.test(endParam)
+    ? dayWindow(endParam, timeZone).end
+    : parseTimestampInTimeZone(endParam, timeZone)
+
+  if (!start || !end) {
+    throw new Error('Invalid detail range.')
+  }
+
+  if (end.getTime() <= start.getTime()) {
+    throw new Error('Detail range end must be after the start.')
+  }
+
+  return {
+    rangeStartMs: start.getTime(),
+    rangeEndMs: end.getTime(),
+  }
+}
+
+async function fetchRecordingInspectionScope(
+  lookupValue: string,
+  windowSeconds: number,
+): Promise<RecordingInspectionScope> {
+  const normalizedRecordingName = normalizeRecordingLookupValue(lookupValue)
+  if (!normalizedRecordingName) {
+    throw new Error('Recording name or WAV path is required.')
+  }
+
+  const pool = await getPool()
+  const recordingResult = await pool.query<Record<string, unknown>>(`
+    SELECT
+      recording_id,
+      recording_name,
+      channel,
+      recording_started_at,
+      audio_path
+    FROM comskip_ground_truth_recordings
+    WHERE recording_name = $1
+    LIMIT 1
+  `, [normalizedRecordingName])
+
+  const recordingRow = recordingResult.rows[0]
+  if (!recordingRow) {
+    throw new Error(`No comskip ground truth recording found for ${normalizedRecordingName}.`)
+  }
+
+  const recordingStartedAt = new Date(String(recordingRow.recording_started_at))
+  const windowStartMs = recordingStartedAt.getTime()
+  const windowEndMs = windowStartMs + windowSeconds * 1000
+  const recordingId = Number(recordingRow.recording_id)
+
+  const breaksResult = await pool.query<Record<string, unknown>>(`
+    SELECT
+      r.recording_id,
+      r.recording_name,
+      r.channel,
+      r.audio_path,
+      r.recording_started_at,
+      b.break_id,
+      b.break_number,
+      b.start_offset_sec,
+      b.end_offset_sec,
+      b.played_at_start,
+      b.played_at_end
+    FROM comskip_ground_truth_breaks b
+    JOIN comskip_ground_truth_recordings r ON r.recording_id = b.recording_id
+    WHERE r.recording_id = $1
+      AND b.played_at_end > $2
+      AND b.played_at_start < $3
+    ORDER BY b.break_number
+  `, [
+    recordingId,
+    new Date(windowStartMs).toISOString(),
+    new Date(windowEndMs).toISOString(),
+  ])
+
+  const truthIntervals = breaksResult.rows
+    .map((row) => buildTruthInterval(row as Record<string, unknown>))
+    .map((interval) => clipInterval(interval, windowStartMs, windowEndMs))
+    .filter((interval): interval is TruthInterval => interval !== null)
+
+  return {
+    channel: String(recordingRow.channel),
+    normalizedRecordingName: String(recordingRow.recording_name),
+    lookupValue,
+    audioPath: typeof recordingRow.audio_path === 'string' ? recordingRow.audio_path : null,
+    recordingStartedAt: new Date(String(recordingRow.recording_started_at)).toISOString(),
+    windowStartMs,
+    windowEndMs,
+    truthIntervals,
   }
 }
 
@@ -1053,34 +1180,107 @@ async function getChannelBreakdown(params: {
   }
 }
 
-async function getChannelDetail(params: {
+async function getPerformanceDetail(params: {
   docClient: DynamoDBDocumentClient
   dataLabelsTable: string
   channel: string
-  day: string
+  scopeType: DetailScopeType
+  day?: string
+  start?: string
+  end?: string
+  recording?: string
+  windowSeconds?: number
   timeZone: string
 }): Promise<ChannelDetailResponse> {
-  const { start, end } = dayWindow(params.day, params.timeZone)
-  const windowData = await loadWindowData({
-    docClient: params.docClient,
-    dataLabelsTable: params.dataLabelsTable,
-    channel: params.channel,
-    windowStartMs: start.getTime(),
-    windowEndMs: end.getTime(),
-    timeZone: params.timeZone,
-  })
+  let resolvedChannel = params.channel
+  let windowStartMs = 0
+  let windowEndMs = 0
+  let windowData: WindowData
+  let scope: ChannelDetailResponse['scope']
+
+  if (params.scopeType === 'recording') {
+    const windowSeconds = params.windowSeconds ?? 30 * 60
+    const recordingScope = await fetchRecordingInspectionScope(params.recording ?? '', windowSeconds)
+    resolvedChannel = recordingScope.channel
+    windowStartMs = recordingScope.windowStartMs
+    windowEndMs = recordingScope.windowEndMs
+    const modelIntervals = await loadModelIntervals({
+      docClient: params.docClient,
+      dataLabelsTable: params.dataLabelsTable,
+      channel: resolvedChannel,
+      windowStartMs,
+      windowEndMs,
+      timeZone: params.timeZone,
+    })
+    windowData = createWindowData(recordingScope.truthIntervals, modelIntervals, windowStartMs, windowEndMs)
+    scope = {
+      type: 'recording',
+      label: recordingScope.normalizedRecordingName,
+      windowStart: toIsoString(windowStartMs),
+      windowEnd: toIsoString(windowEndMs),
+      recordingName: recordingScope.normalizedRecordingName,
+      lookupValue: recordingScope.lookupValue,
+      audioPath: recordingScope.audioPath,
+      recordingStartedAt: recordingScope.recordingStartedAt,
+      windowSeconds,
+    }
+  } else if (params.scopeType === 'range') {
+    if (!params.start || !params.end) {
+      throw new Error('Range detail requires both start and end.')
+    }
+    const bounds = getExplicitRangeBounds(params.start, params.end, params.timeZone)
+    windowStartMs = bounds.rangeStartMs
+    windowEndMs = bounds.rangeEndMs
+    windowData = await loadWindowData({
+      docClient: params.docClient,
+      dataLabelsTable: params.dataLabelsTable,
+      channel: resolvedChannel,
+      windowStartMs,
+      windowEndMs,
+      timeZone: params.timeZone,
+    })
+    scope = {
+      type: 'range',
+      label: `${params.start} to ${params.end}`,
+      windowStart: toIsoString(windowStartMs),
+      windowEnd: toIsoString(windowEndMs),
+      start: params.start,
+      end: params.end,
+    }
+  } else {
+    const day = params.day ?? new Date().toISOString().slice(0, 10)
+    const { start, end } = dayWindow(day, params.timeZone)
+    windowStartMs = start.getTime()
+    windowEndMs = end.getTime()
+    windowData = await loadWindowData({
+      docClient: params.docClient,
+      dataLabelsTable: params.dataLabelsTable,
+      channel: resolvedChannel,
+      windowStartMs,
+      windowEndMs,
+      timeZone: params.timeZone,
+    })
+    scope = {
+      type: 'day',
+      label: day,
+      windowStart: toIsoString(windowStartMs),
+      windowEnd: toIsoString(windowEndMs),
+      day,
+    }
+  }
 
   return {
     generatedAt: new Date().toISOString(),
     timezone: params.timeZone,
-    channel: params.channel,
-    day: params.day,
+    channel: resolvedChannel,
+    scope,
     summary: windowData.metrics,
     groundTruthIntervals: windowData.truthIntervals,
     modelIntervals: windowData.modelIntervals,
     breakComparisons: windowData.breakComparisons,
     hourOfDay: buildHourOfDayBreakdown(windowData.breakComparisons, params.timeZone),
     durationBuckets: buildDurationBreakdown(windowData.breakComparisons),
+    recordings: buildRecordingBreakdown(windowData.truthIntervals, windowData.breakComparisons),
   }
 }
 
@@ -1196,6 +1396,53 @@ export function registerModelPerformanceRoutes(options: RegisterModelPerformance
     }
   })
 
+  app.get('/api/model-performance/detail', async (request, response) => {
+    try {
+      const timezone = getTimeZone(request)
+      const scopeType = (
+        typeof request.query.scope === 'string' ? request.query.scope : 'day'
+      ) as DetailScopeType
+      const channel = normalizeChannelValue(request.query.channel)
+      const day = typeof request.query.day === 'string' ? request.query.day : undefined
+      const start = typeof request.query.start === 'string' ? request.query.start : undefined
+      const end = typeof request.query.end === 'string' ? request.query.end : undefined
+      const recording =
+        typeof request.query.recording === 'string'
+          ? request.query.recording
+          : typeof request.query.recordingName === 'string'
+            ? request.query.recordingName
+            : typeof request.query.wavFile === 'string'
+              ? request.query.wavFile
+              : undefined
+      const windowSeconds =
+        typeof request.query.windowSeconds === 'string'
+          ? Number.parseInt(request.query.windowSeconds, 10)
+          : undefined
+      const cacheKey = `model-performance:detail:${scopeType}:${channel}:${day ?? ''}:${start ?? ''}:${end ?? ''}:${recording ?? ''}:${windowSeconds ?? ''}:${timezone}`
+      const cached = getCached<ChannelDetailResponse>(cacheKey)
+      if (cached && request.query.refresh !== 'true') {
+        return response.json(cached)
+      }
+
+      const payload = await getPerformanceDetail({
+        docClient,
+        dataLabelsTable,
+        channel,
+        scopeType,
+        day,
+        start,
+        end,
+        recording,
+        windowSeconds: Number.isFinite(windowSeconds) ? windowSeconds : undefined,
+        timeZone: timezone,
+      })
+      setCached(cacheKey, payload)
+      response.json(payload)
+    } catch (error) {
+      sendError(response, error, 'Failed to load model performance detail.')
+    }
+  })
+
   app.get('/api/model-performance/channels/:channel/day', async (request, response) => {
     try {
       const channel = normalizeChannelValue(request.params.channel)
@@ -1207,10 +1454,11 @@ export function registerModelPerformanceRoutes(options: RegisterModelPerformance
         return response.json(cached)
       }
 
-      const payload = await getChannelDetail({
+      const payload = await getPerformanceDetail({
         docClient,
         dataLabelsTable,
         channel,
+        scopeType: 'day',
         day,
         timeZone: timezone,
       })

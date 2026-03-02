@@ -2,5 +2,5 @@ import serverless from 'serverless-http'
 import app from '../../server'
 
 export const handler = serverless(app, {
-  basePath: '/.netlify/functions/api',
+  basePath: '/.netlify/functions',
 })
