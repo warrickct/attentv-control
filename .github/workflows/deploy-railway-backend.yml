@@ -30,5 +30,5 @@ jobs:
 
       - name: Deploy Backend
         env:
-          RAILWAY_API_KEY: ${{ secrets.RAILWAY_API_KEY }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_KEY }}
         run: railway up --service backend --environment production --project 622725e1-a95d-4f45-b05b-0652ee489c74 --detach
