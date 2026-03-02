@@ -171,10 +171,10 @@ function App() {
 
   // Fetch data when device is selected
   useEffect(() => {
-    if (user && selectedDevice) {
+    if (user && selectedDevice && viewMode === 'device') {
       fetchDeviceData(selectedDevice)
     }
-  }, [selectedDevice, fetchDeviceData, user])
+  }, [selectedDevice, fetchDeviceData, user, viewMode])
 
   const handleLogin = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault()

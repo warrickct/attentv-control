@@ -84,7 +84,6 @@ interface CacheEntry<T> {
 
 const MODEL_PERFORMANCE_CACHE_TTL_MS = 60 * 1000
 const TABLE_CHECK_CACHE_TTL_MS = 5 * 60 * 1000
-const MAX_DYNAMO_FALLBACK_RANGE_MS = 48 * 60 * 60 * 1000
 const performanceCache = new Map<string, CacheEntry<unknown>>()
 const tableExistsCache = new Map<string, CacheEntry<boolean>>()
 
@@ -405,24 +404,27 @@ async function fetchModelIntervalsFromDynamo(params: {
   timeZone: string
 }): Promise<ModelInterval[]> {
   const { docClient, dataLabelsTable, channel, windowStartMs, windowEndMs, timeZone } = params
-  if (windowEndMs - windowStartMs > MAX_DYNAMO_FALLBACK_RANGE_MS) {
-    throw new Error(
-      'Historical model performance queries require the normalized SQL table model_detection_events. Run the sync job before loading long ranges.',
-    )
-  }
-
   const items: Record<string, unknown>[] = []
   let lastEvaluatedKey: Record<string, unknown> | undefined
 
   do {
     const command = new ScanCommand({
       TableName: dataLabelsTable,
+      ProjectionExpression: '#id, #channel, #startTime, #stopTime, #duration, #isTest, #userName',
+      ExpressionAttributeNames: {
+        '#id': 'id',
+        '#channel': 'channel',
+        '#startTime': 'startTime',
+        '#stopTime': 'stopTime',
+        '#duration': 'duration',
+        '#isTest': 'is_test',
+        '#userName': 'userName',
+      },
       ExclusiveStartKey: lastEvaluatedKey,
       Limit: 1000,
       ...(channel !== 'all'
         ? {
             FilterExpression: '#channel = :channel',
-            ExpressionAttributeNames: { '#channel': 'channel' },
             ExpressionAttributeValues: { ':channel': channel },
           }
         : undefined),
@@ -1286,6 +1288,7 @@ async function getPerformanceDetail(params: {
 
 function sendError(response: Response, error: unknown, fallbackMessage: string): void {
   const message = error instanceof Error ? error.message : fallbackMessage
+  console.error(fallbackMessage, error)
   response.status(500).json({
     error: message,
   })

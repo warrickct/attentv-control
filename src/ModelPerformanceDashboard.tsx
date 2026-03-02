@@ -426,7 +426,8 @@ export default function ModelPerformanceDashboard() {
         })
         const response = await apiFetch(`${API_URL}/api/model-performance/overview?${params.toString()}`)
         if (!response.ok) {
-          throw new Error('Failed to fetch model performance overview')
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Failed to fetch model performance overview')
         }
         const data = await response.json()
         setOverview(data)
@@ -457,7 +458,8 @@ export default function ModelPerformanceDashboard() {
         }
         const response = await apiFetch(`${API_URL}/api/model-performance/trends?${params.toString()}`)
         if (!response.ok) {
-          throw new Error('Failed to fetch model performance trends')
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Failed to fetch model performance trends')
         }
         const data = await response.json()
         setTrends(data)
@@ -485,7 +487,8 @@ export default function ModelPerformanceDashboard() {
         })
         const response = await apiFetch(`${API_URL}/api/model-performance/channels?${params.toString()}`)
         if (!response.ok) {
-          throw new Error('Failed to fetch channel breakdown')
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Failed to fetch channel breakdown')
         }
         const data = await response.json()
         setChannelBreakdown(data)

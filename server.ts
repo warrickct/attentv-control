@@ -100,6 +100,16 @@ const deviceSummaryCache = new Map<string, CacheEntry<any>>()
 const deviceAdsCache = new Map<string, CacheEntry<any>>()
 const aggregateCache = new Map<string, CacheEntry<any>>()
 const dataLabelsChannelsCache = new Map<string, CacheEntry<string[]>>()
+const AGGREGATE_DATA_CACHE_TTL = 10 * 60 * 1000
+const AD_PLAYS_TABLE = process.env.AD_PLAYS_TABLE || 'attentv-ad-plays-prod'
+let aggregateDataPromise: Promise<AdPlayItem[]> | null = null
+
+interface AdPlayItem {
+  device_id?: string
+  timestamp?: string
+  ad_filename?: string
+  play_duration?: number
+}
 
 // Helper to get cached data or null if expired
 function getCached<T>(cache: Map<string, CacheEntry<T>>, key: string, ttl: number = CACHE_TTL): T | null {
@@ -121,6 +131,58 @@ function setCached<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T): 
     data,
     timestamp: Date.now(),
   })
+}
+
+async function scanAdPlayItems(): Promise<AdPlayItem[]> {
+  const items: AdPlayItem[] = []
+  let lastEvaluatedKey: Record<string, unknown> | undefined
+
+  do {
+    const command = new ScanCommand({
+      TableName: AD_PLAYS_TABLE,
+      ProjectionExpression: '#device, #ts, #ad, #duration',
+      ExpressionAttributeNames: {
+        '#device': 'device_id',
+        '#ts': 'timestamp',
+        '#ad': 'ad_filename',
+        '#duration': 'play_duration',
+      },
+      ExclusiveStartKey: lastEvaluatedKey,
+      Limit: 1000,
+    })
+    const response = await docClient.send(command)
+    if (response.Items) {
+      items.push(...(response.Items as AdPlayItem[]))
+    }
+    lastEvaluatedKey = response.LastEvaluatedKey as Record<string, unknown> | undefined
+  } while (lastEvaluatedKey)
+
+  return items
+}
+
+async function getAggregateAdPlayItems(forceRefresh: boolean = false): Promise<AdPlayItem[]> {
+  const cacheKey = 'ad-play-items'
+
+  if (!forceRefresh) {
+    const cached = getCached(aggregateCache, cacheKey, AGGREGATE_DATA_CACHE_TTL)
+    if (cached) {
+      return cached as AdPlayItem[]
+    }
+    if (aggregateDataPromise) {
+      return aggregateDataPromise
+    }
+  }
+
+  aggregateDataPromise = scanAdPlayItems()
+    .then((items) => {
+      setCached(aggregateCache, cacheKey, items)
+      return items
+    })
+    .finally(() => {
+      aggregateDataPromise = null
+    })
+
+  return aggregateDataPromise
 }
 
 // Health check endpoint
@@ -294,13 +356,12 @@ app.get('/api/stats/device/:deviceId/summary', async (req, res) => {
       }
     }
 
-    const tableName = 'attentv-ad-plays-prod'
     const oneHourAgo = getHoursAgoTimestamp(1)
     const twentyFourHoursAgo = getHoursAgoTimestamp(24)
 
     // Query for plays in past 24 hours
     const query24hr = new QueryCommand({
-      TableName: tableName,
+      TableName: AD_PLAYS_TABLE,
       IndexName: 'device-index',
       KeyConditionExpression: '#device = :device AND #timestamp >= :timestamp24hr',
       ExpressionAttributeNames: {
@@ -316,7 +377,7 @@ app.get('/api/stats/device/:deviceId/summary', async (req, res) => {
 
     // Query for plays in past 1 hour
     const query1hr = new QueryCommand({
-      TableName: tableName,
+      TableName: AD_PLAYS_TABLE,
       IndexName: 'device-index',
       KeyConditionExpression: '#device = :device AND #timestamp >= :timestamp1hr',
       ExpressionAttributeNames: {
@@ -332,7 +393,7 @@ app.get('/api/stats/device/:deviceId/summary', async (req, res) => {
 
     // Query for last play time (most recent)
     const queryLast = new QueryCommand({
-      TableName: tableName,
+      TableName: AD_PLAYS_TABLE,
       IndexName: 'device-index',
       KeyConditionExpression: '#device = :device',
       ExpressionAttributeNames: {
@@ -376,7 +437,6 @@ app.get('/api/stats/device/:deviceId/summary', async (req, res) => {
 app.get('/api/stats/device/:deviceId/timeseries', async (req, res) => {
   try {
     const { deviceId } = req.params
-    const tableName = 'attentv-ad-plays-prod'
 
     // Get all items for this device (with pagination)
     const items: any[] = []
@@ -385,11 +445,16 @@ app.get('/api/stats/device/:deviceId/timeseries', async (req, res) => {
 
     while (hasMore) {
       const queryParams: any = {
-        TableName: tableName,
+        TableName: AD_PLAYS_TABLE,
         IndexName: 'device-index',
         KeyConditionExpression: '#device = :device',
+        ProjectionExpression: '#device, #ts, #ad, #duration, #playId',
         ExpressionAttributeNames: {
           '#device': 'device_id',
+          '#ts': 'timestamp',
+          '#ad': 'ad_filename',
+          '#duration': 'play_duration',
+          '#playId': 'play_id',
         },
         ExpressionAttributeValues: {
           ':device': deviceId,
@@ -447,100 +512,39 @@ app.get('/api/stats/device/:deviceId/ads', async (req, res) => {
       }
     }
 
-    const tableName = 'attentv-ad-plays-prod'
+    const items = await getAllItemsForDevice(deviceId)
+    const adMap = new Map<string, { totalPlays: number; totalDuration: number; lastPlayed: string | null }>()
 
-    // First, get list of ads for this device from S3
-    const prefix = `${deviceId}/`
-    const s3Command = new ListObjectsV2Command({
-      Bucket: S3_BUCKET,
-      Prefix: prefix,
-    })
-    const s3Response = await s3Client.send(s3Command)
-    const ads = (s3Response.Contents || [])
-      .map(obj => obj.Key?.replace(prefix, ''))
-      .filter((ad): ad is string => !!ad && ad.endsWith('.mp4'))
-      .sort()
+    for (const item of items) {
+      const adFilename = typeof item.ad_filename === 'string' ? item.ad_filename : null
+      if (!adFilename) {
+        continue
+      }
 
-    // Query DynamoDB for each ad using device-index (more efficient)
-    // Query by device_id, then filter by ad_filename
-    const adStats = await Promise.all(
-      ads.map(async (adFilename) => {
-        try {
-          // Get all items for this device and ad (with pagination)
-          const items: any[] = []
-          let lastEvaluatedKey = undefined
-          let hasMore = true
+      const existing = adMap.get(adFilename) ?? {
+        totalPlays: 0,
+        totalDuration: 0,
+        lastPlayed: null,
+      }
+      const timestamp = typeof item.timestamp === 'string' ? item.timestamp : null
+      const playDuration = typeof item.play_duration === 'number' ? item.play_duration : Number(item.play_duration || 0)
+      if (!existing.lastPlayed || (timestamp && new Date(timestamp).getTime() > new Date(existing.lastPlayed).getTime())) {
+        existing.lastPlayed = timestamp
+      }
+      existing.totalPlays += 1
+      existing.totalDuration += Number.isFinite(playDuration) ? playDuration : 0
+      adMap.set(adFilename, existing)
+    }
 
-          while (hasMore) {
-            const queryParams: any = {
-              TableName: tableName,
-              IndexName: 'device-index',
-              KeyConditionExpression: '#device = :device',
-              FilterExpression: '#ad = :ad',
-              ExpressionAttributeNames: {
-                '#device': 'device_id',
-                '#ad': 'ad_filename',
-              },
-              ExpressionAttributeValues: {
-                ':device': deviceId,
-                ':ad': adFilename,
-              },
-            }
-
-            // Only add ExclusiveStartKey if we have one (not on first iteration)
-            if (lastEvaluatedKey) {
-              queryParams.ExclusiveStartKey = lastEvaluatedKey
-            }
-
-            const paginatedQuery = new QueryCommand(queryParams)
-            const response = await docClient.send(paginatedQuery)
-            
-            // Add items that passed the filter
-            if (response.Items) {
-              items.push(...response.Items)
-            }
-            
-            // Check if there are more pages
-            lastEvaluatedKey = response.LastEvaluatedKey
-            hasMore = !!lastEvaluatedKey
-          }
-
-          // Calculate aggregations
-          const totalPlays = items.length
-          const totalDuration = items.reduce((sum, item) => sum + (item.play_duration || 0), 0)
-          const averageDuration = totalPlays > 0 ? totalDuration / totalPlays : 0
-          
-          // Find last played timestamp
-          let lastPlayed: string | null = null
-          if (items.length > 0) {
-            const sorted = [...items].sort((a, b) => {
-              const timeA = new Date(a.timestamp || 0).getTime()
-              const timeB = new Date(b.timestamp || 0).getTime()
-              return timeB - timeA
-            })
-            lastPlayed = sorted[0]?.timestamp || null
-          }
-
-          return {
-            adFilename,
-            totalPlays,
-            totalDuration,
-            averageDuration,
-            lastPlayed,
-          }
-        } catch (error: any) {
-          console.error(`Error fetching stats for ad ${adFilename}:`, error)
-          return {
-            adFilename,
-            totalPlays: 0,
-            totalDuration: 0,
-            averageDuration: 0,
-            lastPlayed: null,
-            error: error.message,
-          }
-        }
-      })
-    )
+    const adStats = Array.from(adMap.entries())
+      .map(([adFilename, stats]) => ({
+        adFilename,
+        totalPlays: stats.totalPlays,
+        totalDuration: stats.totalDuration,
+        averageDuration: stats.totalPlays > 0 ? stats.totalDuration / stats.totalPlays : 0,
+        lastPlayed: stats.lastPlayed,
+      }))
+      .sort((left, right) => right.totalPlays - left.totalPlays || left.adFilename.localeCompare(right.adFilename))
 
     const response = {
       deviceId,
@@ -580,18 +584,21 @@ async function getAllDevices(): Promise<string[]> {
 
 // Helper function to get all items for a device with pagination
 async function getAllItemsForDevice(deviceId: string): Promise<any[]> {
-  const tableName = 'attentv-ad-plays-prod'
   const items: any[] = []
   let lastEvaluatedKey = undefined
   let hasMore = true
 
   while (hasMore) {
     const queryParams: any = {
-      TableName: tableName,
+      TableName: AD_PLAYS_TABLE,
       IndexName: 'device-index',
       KeyConditionExpression: '#device = :device',
+      ProjectionExpression: '#device, #ts, #ad, #duration',
       ExpressionAttributeNames: {
         '#device': 'device_id',
+        '#ts': 'timestamp',
+        '#ad': 'ad_filename',
+        '#duration': 'play_duration',
       },
       ExpressionAttributeValues: {
         ':device': deviceId,
@@ -630,32 +637,24 @@ app.get('/api/stats/aggregate/summary', async (req, res) => {
     }
 
     const devices = await getAllDevices()
-    const tableName = 'attentv-ad-plays-prod'
-    
     const now = new Date()
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString()
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString()
     const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
-    // Get all items across all devices
-    const allItems: any[] = []
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
     const uniqueAds = new Set<string>()
     let totalDuration = 0
 
-    for (const deviceId of devices) {
-      const items = await getAllItemsForDevice(deviceId)
-      allItems.push(...items)
-      
-      items.forEach(item => {
-        if (item.ad_filename) uniqueAds.add(item.ad_filename)
-        if (item.play_duration) totalDuration += item.play_duration
-      })
-    }
+    allItems.forEach(item => {
+      if (item.ad_filename) uniqueAds.add(item.ad_filename)
+      if (item.play_duration) totalDuration += item.play_duration
+    })
 
     const totalPlays = allItems.length
-    const totalPlays24hr = allItems.filter(item => item.timestamp >= oneDayAgo).length
-    const totalPlays7d = allItems.filter(item => item.timestamp >= sevenDaysAgo).length
-    const totalPlays30d = allItems.filter(item => item.timestamp >= thirtyDaysAgo).length
+    const totalPlays24hr = allItems.filter(item => typeof item.timestamp === 'string' && item.timestamp >= oneDayAgo).length
+    const totalPlays7d = allItems.filter(item => typeof item.timestamp === 'string' && item.timestamp >= sevenDaysAgo).length
+    const totalPlays30d = allItems.filter(item => typeof item.timestamp === 'string' && item.timestamp >= thirtyDaysAgo).length
     const activeDevices = devices.length
     const avgPlaysPerDevice = activeDevices > 0 ? totalPlays / activeDevices : 0
 
@@ -695,13 +694,7 @@ app.get('/api/stats/aggregate/hourly-patterns', async (req, res) => {
       }
     }
 
-    const devices = await getAllDevices()
-    const allItems: any[] = []
-
-    for (const deviceId of devices) {
-      const items = await getAllItemsForDevice(deviceId)
-      allItems.push(...items)
-    }
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
 
     // Group by hour (and optionally day of week)
     const hourMap = new Map<string, { plays: number, duration: number }>()
@@ -756,13 +749,7 @@ app.get('/api/stats/aggregate/day-of-week', async (req, res) => {
       }
     }
 
-    const devices = await getAllDevices()
-    const allItems: any[] = []
-
-    for (const deviceId of devices) {
-      const items = await getAllItemsForDevice(deviceId)
-      allItems.push(...items)
-    }
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
 
     // Group by day of week (0 = Sunday, 6 = Saturday)
     const dayMap = new Map<number, { plays: number, duration: number }>()
@@ -815,13 +802,7 @@ app.get('/api/stats/aggregate/week-comparison', async (req, res) => {
       }
     }
 
-    const devices = await getAllDevices()
-    const allItems: any[] = []
-
-    for (const deviceId of devices) {
-      const items = await getAllItemsForDevice(deviceId)
-      allItems.push(...items)
-    }
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
 
     const now = new Date()
     const oneWeekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000)
@@ -898,122 +879,59 @@ app.get('/api/stats/ads/leaderboard', async (req, res) => {
       }
     }
 
-    const devices = await getAllDevices()
-    const tableName = 'attentv-ad-plays-prod'
-    
-    // Get all unique ads from S3
-    const allAds = new Set<string>()
-    for (const deviceId of devices) {
-      const prefix = `${deviceId}/`
-      const s3Command = new ListObjectsV2Command({
-        Bucket: S3_BUCKET,
-        Prefix: prefix,
-      })
-      const s3Response = await s3Client.send(s3Command)
-      const ads = (s3Response.Contents || [])
-        .map(obj => obj.Key?.replace(prefix, ''))
-        .filter((ad): ad is string => !!ad && ad.endsWith('.mp4'))
-      ads.forEach(ad => allAds.add(ad))
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
+    const adMap = new Map<string, {
+      totalPlays: number
+      totalDuration: number
+      firstPlayMs: number | null
+      lastPlayMs: number | null
+      deviceSet: Set<string>
+    }>()
+
+    for (const item of allItems) {
+      const adFilename = typeof item.ad_filename === 'string' ? item.ad_filename : null
+      if (!adFilename) {
+        continue
+      }
+
+      const existing = adMap.get(adFilename) ?? {
+        totalPlays: 0,
+        totalDuration: 0,
+        firstPlayMs: null,
+        lastPlayMs: null,
+        deviceSet: new Set<string>(),
+      }
+      const playDuration = typeof item.play_duration === 'number' ? item.play_duration : Number(item.play_duration || 0)
+      const timestampMs = item.timestamp ? new Date(item.timestamp).getTime() : null
+      existing.totalPlays += 1
+      existing.totalDuration += Number.isFinite(playDuration) ? playDuration : 0
+      if (typeof item.device_id === 'string' && item.device_id) {
+        existing.deviceSet.add(item.device_id)
+      }
+      if (timestampMs !== null && Number.isFinite(timestampMs)) {
+        existing.firstPlayMs = existing.firstPlayMs === null ? timestampMs : Math.min(existing.firstPlayMs, timestampMs)
+        existing.lastPlayMs = existing.lastPlayMs === null ? timestampMs : Math.max(existing.lastPlayMs, timestampMs)
+      }
+      adMap.set(adFilename, existing)
     }
 
-    // Get stats for each ad across all devices
-    const adStats = await Promise.all(
-      Array.from(allAds).map(async (adFilename) => {
-        try {
-          const items: any[] = []
-          const deviceSet = new Set<string>()
+    const adStats = Array.from(adMap.entries()).map(([adFilename, stats]) => {
+      const averageDuration = stats.totalPlays > 0 ? stats.totalDuration / stats.totalPlays : 0
+      const daysDiff =
+        stats.firstPlayMs !== null && stats.lastPlayMs !== null
+          ? Math.max(1, (stats.lastPlayMs - stats.firstPlayMs) / (1000 * 60 * 60 * 24))
+          : 1
 
-          // Query each device for this ad
-          for (const deviceId of devices) {
-            let lastEvaluatedKey = undefined
-            let hasMore = true
-
-            while (hasMore) {
-              const queryParams: any = {
-                TableName: tableName,
-                IndexName: 'device-index',
-                KeyConditionExpression: '#device = :device',
-                FilterExpression: '#ad = :ad',
-                ExpressionAttributeNames: {
-                  '#device': 'device_id',
-                  '#ad': 'ad_filename',
-                },
-                ExpressionAttributeValues: {
-                  ':device': deviceId,
-                  ':ad': adFilename,
-                },
-              }
-
-              if (lastEvaluatedKey) {
-                queryParams.ExclusiveStartKey = lastEvaluatedKey
-              }
-
-              const query = new QueryCommand(queryParams)
-              const response = await docClient.send(query)
-              
-              if (response.Items) {
-                items.push(...response.Items)
-                deviceSet.add(deviceId)
-              }
-              
-              lastEvaluatedKey = response.LastEvaluatedKey
-              hasMore = !!lastEvaluatedKey
-            }
-          }
-
-          const totalPlays = items.length
-          const totalDuration = items.reduce((sum, item) => sum + (item.play_duration || 0), 0)
-          const averageDuration = totalPlays > 0 ? totalDuration / totalPlays : 0
-          
-          // Calculate frequency (plays per day)
-          let frequency = 0
-          if (items.length > 0) {
-            const sorted = items.sort((a, b) => {
-              const timeA = new Date(a.timestamp || 0).getTime()
-              const timeB = new Date(b.timestamp || 0).getTime()
-              return timeA - timeB
-            })
-            const firstPlay = new Date(sorted[0].timestamp)
-            const lastPlay = new Date(sorted[sorted.length - 1].timestamp)
-            const daysDiff = Math.max(1, (lastPlay.getTime() - firstPlay.getTime()) / (1000 * 60 * 60 * 24))
-            frequency = totalPlays / daysDiff
-          }
-
-          // Find last played
-          let lastPlayed: string | null = null
-          if (items.length > 0) {
-            const sorted = [...items].sort((a, b) => {
-              const timeA = new Date(a.timestamp || 0).getTime()
-              const timeB = new Date(b.timestamp || 0).getTime()
-              return timeB - timeA
-            })
-            lastPlayed = sorted[0]?.timestamp || null
-          }
-
-          return {
-            adFilename,
-            totalPlays,
-            totalDuration,
-            averageDuration,
-            frequency: Math.round(frequency * 100) / 100,
-            deviceCount: deviceSet.size,
-            lastPlayed,
-          }
-        } catch (error: any) {
-          console.error(`Error fetching stats for ad ${adFilename}:`, error)
-          return {
-            adFilename,
-            totalPlays: 0,
-            totalDuration: 0,
-            averageDuration: 0,
-            frequency: 0,
-            deviceCount: 0,
-            lastPlayed: null,
-            error: error.message,
-          }
-        }
-      })
-    )
+      return {
+        adFilename,
+        totalPlays: stats.totalPlays,
+        totalDuration: stats.totalDuration,
+        averageDuration,
+        frequency: Math.round((stats.totalPlays / daysDiff) * 100) / 100,
+        deviceCount: stats.deviceSet.size,
+        lastPlayed: stats.lastPlayMs === null ? null : new Date(stats.lastPlayMs).toISOString(),
+      }
+    })
 
     // Sort by requested field
     const sorted = adStats.sort((a, b) => {
@@ -1058,37 +976,51 @@ app.get('/api/stats/devices/comparison', async (req, res) => {
     }
 
     const devices = await getAllDevices()
-    const tableName = 'attentv-ad-plays-prod'
-    
-    const deviceStats = await Promise.all(
-      devices.map(async (deviceId) => {
-        const items = await getAllItemsForDevice(deviceId)
-        
-        const totalPlays = items.length
-        const totalDuration = items.reduce((sum, item) => sum + (item.play_duration || 0), 0)
-        
-        // Calculate average plays per day
-        let avgPlaysPerDay = 0
-        if (items.length > 0) {
-          const sorted = items.sort((a, b) => {
-            const timeA = new Date(a.timestamp || 0).getTime()
-            const timeB = new Date(b.timestamp || 0).getTime()
-            return timeA - timeB
-          })
-          const firstPlay = new Date(sorted[0].timestamp)
-          const lastPlay = new Date(sorted[sorted.length - 1].timestamp)
-          const daysDiff = Math.max(1, (lastPlay.getTime() - firstPlay.getTime()) / (1000 * 60 * 60 * 24))
-          avgPlaysPerDay = totalPlays / daysDiff
-        }
+    const allItems = await getAggregateAdPlayItems(forceRefresh)
+    const deviceMap = new Map<string, { totalPlays: number; totalDuration: number; firstPlayMs: number | null; lastPlayMs: number | null }>()
 
-        return {
-          deviceId,
-          totalPlays,
-          avgPlaysPerDay: Math.round(avgPlaysPerDay * 100) / 100,
-          totalDuration,
-        }
-      })
-    )
+    for (const item of allItems) {
+      const deviceId = typeof item.device_id === 'string' ? item.device_id : null
+      if (!deviceId) {
+        continue
+      }
+
+      const existing = deviceMap.get(deviceId) ?? {
+        totalPlays: 0,
+        totalDuration: 0,
+        firstPlayMs: null,
+        lastPlayMs: null,
+      }
+      const playDuration = typeof item.play_duration === 'number' ? item.play_duration : Number(item.play_duration || 0)
+      const timestampMs = item.timestamp ? new Date(item.timestamp).getTime() : null
+      existing.totalPlays += 1
+      existing.totalDuration += Number.isFinite(playDuration) ? playDuration : 0
+      if (timestampMs !== null && Number.isFinite(timestampMs)) {
+        existing.firstPlayMs = existing.firstPlayMs === null ? timestampMs : Math.min(existing.firstPlayMs, timestampMs)
+        existing.lastPlayMs = existing.lastPlayMs === null ? timestampMs : Math.max(existing.lastPlayMs, timestampMs)
+      }
+      deviceMap.set(deviceId, existing)
+    }
+
+    const deviceStats = devices.map((deviceId) => {
+      const stats = deviceMap.get(deviceId) ?? {
+        totalPlays: 0,
+        totalDuration: 0,
+        firstPlayMs: null,
+        lastPlayMs: null,
+      }
+      const daysDiff =
+        stats.firstPlayMs !== null && stats.lastPlayMs !== null
+          ? Math.max(1, (stats.lastPlayMs - stats.firstPlayMs) / (1000 * 60 * 60 * 24))
+          : 1
+
+      return {
+        deviceId,
+        totalPlays: stats.totalPlays,
+        avgPlaysPerDay: Math.round((stats.totalPlays / daysDiff) * 100) / 100,
+        totalDuration: stats.totalDuration,
+      }
+    })
 
     const response = { devices: deviceStats }
     setCached(aggregateCache, cacheKey, response)
