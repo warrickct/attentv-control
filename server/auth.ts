@@ -15,7 +15,8 @@ interface UserRecord {
 
 export function registerAuthRoutes(options: RegisterAuthRoutesOptions): void {
   const { app, docClient } = options
-  const usersTable = process.env.DYNAMO_USERS_TABLE || 'users'
+  const usersTable = process.env.DYNAMO_USERS_TABLE || 'attentv-labelling-users'
+  const awsRegion = process.env.MY_AWS_REGION || process.env.AWS_REGION || 'ap-southeast-2'
 
   app.get('/api/auth/me', (request, response) => {
     const session = readSession(request)
@@ -43,6 +44,11 @@ export function registerAuthRoutes(options: RegisterAuthRoutesOptions): void {
       return response.json({ ok: true, user: { username: user.username } })
     } catch (error: any) {
       console.error('Error logging in:', error)
+      if (error?.name === 'ResourceNotFoundException' || error?.__type === 'com.amazonaws.dynamodb.v20120810#ResourceNotFoundException') {
+        return response.status(500).json({
+          error: `Configured DynamoDB users table not found: ${usersTable} (${awsRegion})`,
+        })
+      }
       return response.status(500).json({ error: error.message || 'Login failed' })
     }
   })
