@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 export interface DataLabelItem {
   channel: string
@@ -62,7 +61,7 @@ export default function DataLabelsGraph() {
     const fetchChannels = async () => {
       try {
         setLoadingChannels(true)
-        const res = await fetch(`${API_URL}/api/data-labels/channels`)
+        const res = await apiFetch(`${API_URL}/api/data-labels/channels`)
         if (!res.ok) throw new Error('Failed to fetch channels')
         const data = await res.json()
         setChannels(data.channels || [])
@@ -84,7 +83,7 @@ export default function DataLabelsGraph() {
         const url = selectedChannel && selectedChannel !== 'all'
           ? `${API_URL}/api/data-labels?channel=${encodeURIComponent(selectedChannel)}`
           : `${API_URL}/api/data-labels`
-        const res = await fetch(url)
+        const res = await apiFetch(url)
         if (!res.ok) throw new Error('Failed to fetch data labels')
         const data = await res.json()
         setRawData(data.items || [])

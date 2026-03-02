@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface HourlyPattern {
   hour: number
@@ -25,7 +24,7 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
         setLoading(true)
         setError(null)
         const url = `${API_URL}/api/stats/aggregate/hourly-patterns?dayOfWeek=${includeDayOfWeek}`
-        const response = await fetch(url)
+        const response = await apiFetch(url)
         if (!response.ok) {
           throw new Error('Failed to fetch hourly patterns')
         }
@@ -133,4 +132,3 @@ export default function HourOfDayHeatmap({ includeDayOfWeek = false }: HourOfDay
     </div>
   )
 }
-

@@ -10,9 +10,8 @@ import TopAdsLeaderboard from './TopAdsLeaderboard'
 import DeviceComparisonChart from './DeviceComparisonChart'
 import ScreenshotGallery from './ScreenshotGallery'
 import DataLabelsGraph from './DataLabelsGraph'
-
-// Use relative URL in production (same origin), or explicit URL from env, or default to localhost for dev
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import ModelPerformanceDashboard from './ModelPerformanceDashboard'
+import { API_URL, apiFetch } from './api'
 
 interface DeviceSummary {
   deviceId: string
@@ -31,7 +30,11 @@ interface AdAggregation {
   error?: string
 }
 
-type ViewMode = 'screenshots' | 'overview' | 'device' | 'dataLabels'
+interface AuthUser {
+  username: string
+}
+
+type ViewMode = 'screenshots' | 'overview' | 'device' | 'dataLabels' | 'modelPerformance'
 
 function App() {
   const [devices, setDevices] = useState<string[]>([])
@@ -42,11 +45,18 @@ function App() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loadingDevices, setLoadingDevices] = useState(true)
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [loginUsername, setLoginUsername] = useState('')
+  const [loginPassword, setLoginPassword] = useState('')
+  const [loginLoading, setLoginLoading] = useState(false)
+  const [loginError, setLoginError] = useState<string | null>(null)
 
   // Fetch device list from S3
   const fetchDevices = useCallback(async () => {
     try {
-      const response = await fetch(`${API_URL}/api/devices`)
+      setLoadingDevices(true)
+      const response = await apiFetch(`${API_URL}/api/devices`)
       if (!response.ok) {
         throw new Error('Failed to fetch devices')
       }
@@ -67,7 +77,7 @@ function App() {
   const fetchDeviceSummary = useCallback(async (deviceId: string, forceRefresh = false) => {
     try {
       const url = `${API_URL}/api/stats/device/${deviceId}/summary${forceRefresh ? '?refresh=true' : ''}`
-      const response = await fetch(url)
+      const response = await apiFetch(url)
       if (!response.ok) {
         throw new Error(`Failed to fetch summary for ${deviceId}`)
       }
@@ -96,7 +106,7 @@ function App() {
     try {
       setLoading(true)
       const url = `${API_URL}/api/stats/device/${deviceId}/ads${forceRefresh ? '?refresh=true' : ''}`
-      const response = await fetch(url)
+      const response = await apiFetch(url)
       if (!response.ok) {
         throw new Error(`Failed to fetch ad aggregations for ${deviceId}`)
       }
@@ -133,15 +143,84 @@ function App() {
 
   // Initial load
   useEffect(() => {
-    fetchDevices()
-  }, [fetchDevices])
+    const fetchSession = async () => {
+      try {
+        setAuthLoading(true)
+        const response = await apiFetch(`${API_URL}/api/auth/me`)
+        if (!response.ok) {
+          throw new Error('Failed to fetch session')
+        }
+        const data = await response.json()
+        setUser(data.user || null)
+      } catch (err: any) {
+        console.error('Error fetching session:', err)
+        setUser(null)
+      } finally {
+        setAuthLoading(false)
+      }
+    }
+
+    fetchSession()
+  }, [])
+
+  useEffect(() => {
+    if (user) {
+      fetchDevices()
+    }
+  }, [fetchDevices, user])
 
   // Fetch data when device is selected
   useEffect(() => {
-    if (selectedDevice) {
+    if (user && selectedDevice) {
       fetchDeviceData(selectedDevice)
     }
-  }, [selectedDevice, fetchDeviceData])
+  }, [selectedDevice, fetchDeviceData, user])
+
+  const handleLogin = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    try {
+      setLoginLoading(true)
+      setLoginError(null)
+      const response = await apiFetch(`${API_URL}/api/auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+        }),
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to sign in')
+      }
+      setUser(data.user)
+      setLoginPassword('')
+      setError(null)
+    } catch (err: any) {
+      setLoginError(err.message || 'Failed to sign in')
+    } finally {
+      setLoginLoading(false)
+    }
+  }, [loginPassword, loginUsername])
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await apiFetch(`${API_URL}/api/auth/logout`, {
+        method: 'POST',
+      })
+    } catch (err) {
+      console.error('Error logging out:', err)
+    } finally {
+      setUser(null)
+      setDevices([])
+      setSelectedDevice(null)
+      setDeviceSummaries({})
+      setAdAggregations({})
+      setLoadingDevices(false)
+    }
+  }, [])
 
   const formatDuration = (seconds: number | undefined) => {
     if (seconds === undefined || seconds === 0) return '0s'
@@ -201,11 +280,58 @@ function App() {
   const currentSummary = selectedDevice ? deviceSummaries[selectedDevice] : null
   const currentAds = selectedDevice ? adAggregations[selectedDevice] || [] : []
 
+  if (authLoading) {
+    return <div className="loading">Checking session...</div>
+  }
+
+  if (!user) {
+    return (
+      <div className="app">
+        <div className="login-shell">
+          <div className="login-card">
+            <h1>AttenTv Control</h1>
+            <p>Sign in with the same DynamoDB-backed credentials used by `attentv_labeller`.</p>
+            <form onSubmit={handleLogin} className="login-form">
+              <label htmlFor="login-username">Username</label>
+              <input
+                id="login-username"
+                type="text"
+                value={loginUsername}
+                onChange={(event) => setLoginUsername(event.target.value)}
+                autoComplete="username"
+                required
+              />
+              <label htmlFor="login-password">Password</label>
+              <input
+                id="login-password"
+                type="password"
+                value={loginPassword}
+                onChange={(event) => setLoginPassword(event.target.value)}
+                autoComplete="current-password"
+                required
+              />
+              {loginError && <div className="error login-error"><strong>Error:</strong> {loginError}</div>}
+              <button type="submit" disabled={loginLoading}>
+                {loginLoading ? 'Signing in...' : 'Sign In'}
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <header className="header">
         <h1>Ad Play Statistics Dashboard</h1>
         <p>Monitor ad play data by device from AWS DynamoDB</p>
+        <div className="header-session">
+          <span>Signed in as {user.username}</span>
+          <button className="header-logout-button" onClick={handleLogout}>
+            Logout
+          </button>
+        </div>
       </header>
 
       {loadingDevices ? (
@@ -251,11 +377,21 @@ function App() {
             >
               Data Labels
             </button>
+            <button
+              className={`view-mode-tab ${viewMode === 'modelPerformance' ? 'active' : ''}`}
+              onClick={() => setViewMode('modelPerformance')}
+            >
+              Model Performance
+            </button>
           </div>
 
           {viewMode === 'screenshots' ? (
             <div className="screenshots-content">
               <ScreenshotGallery />
+            </div>
+          ) : viewMode === 'modelPerformance' ? (
+            <div className="overview-content">
+              <ModelPerformanceDashboard />
             </div>
           ) : viewMode === 'overview' ? (
             <div className="overview-content">

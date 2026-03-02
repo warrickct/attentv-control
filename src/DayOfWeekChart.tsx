@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface DayOfWeekPattern {
   dayOfWeek: number
@@ -20,7 +19,7 @@ export default function DayOfWeekChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/aggregate/day-of-week`)
+        const response = await apiFetch(`${API_URL}/api/stats/aggregate/day-of-week`)
         if (!response.ok) {
           throw new Error('Failed to fetch day of week patterns')
         }
@@ -110,4 +109,3 @@ export default function DayOfWeekChart() {
     </div>
   )
 }
-

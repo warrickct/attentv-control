@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface WeekComparison {
   currentWeek: {
@@ -31,7 +30,7 @@ export default function WeekOverWeekChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/aggregate/week-comparison`)
+        const response = await apiFetch(`${API_URL}/api/stats/aggregate/week-comparison`)
         if (!response.ok) {
           throw new Error('Failed to fetch week comparison')
         }
@@ -140,4 +139,3 @@ export default function WeekOverWeekChart() {
     </div>
   )
 }
-

@@ -8,10 +8,16 @@ import { DynamoDBDocumentClient, ScanCommand, QueryCommand } from '@aws-sdk/lib-
 import { S3Client, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { fromIni } from '@aws-sdk/credential-providers'
+import { loadLocalEnv } from './server/loadEnv'
+import { registerAuthRoutes } from './server/auth'
+import { requireSession } from './server/session'
+import { registerModelPerformanceRoutes } from './server/modelPerformance'
 
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+loadLocalEnv(__dirname)
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -42,18 +48,32 @@ app.get('/favicon.ico', (req, res) => {
 // Using iotdevice profile which has DynamoDB and S3 permissions
 // const profileName = process.env.AWS_PROFILE || 'attentv-terraform'  // Alternative profile
 const profileName = process.env.AWS_PROFILE || 'iotdevice'
-const region = process.env.AWS_REGION || 'ap-southeast-2'
-const awsCredentials = fromIni({ profile: profileName })
+const region = process.env.MY_AWS_REGION || process.env.AWS_REGION || 'ap-southeast-2'
+const explicitAwsCredentials =
+  process.env.MY_AWS_ACCESS_KEY_ID && process.env.MY_AWS_SECRET_ACCESS_KEY
+    ? {
+        accessKeyId: process.env.MY_AWS_ACCESS_KEY_ID,
+        secretAccessKey: process.env.MY_AWS_SECRET_ACCESS_KEY,
+        ...(process.env.MY_AWS_SESSION_TOKEN
+          ? { sessionToken: process.env.MY_AWS_SESSION_TOKEN }
+          : {}),
+      }
+    : undefined
+const shouldUseProfileCredentials =
+  !explicitAwsCredentials &&
+  !process.env.AWS_ACCESS_KEY_ID &&
+  !process.env.AWS_SECRET_ACCESS_KEY
+const awsCredentials = shouldUseProfileCredentials ? fromIni({ profile: profileName }) : explicitAwsCredentials
 
 const client = new DynamoDBClient({
   region,
-  credentials: awsCredentials,
+  ...(awsCredentials ? { credentials: awsCredentials } : {}),
 })
 const docClient = DynamoDBDocumentClient.from(client)
 
 const s3Client = new S3Client({
   region,
-  credentials: awsCredentials,
+  ...(awsCredentials ? { credentials: awsCredentials } : {}),
 })
 
 const S3_BUCKET = 'attntv'
@@ -100,6 +120,24 @@ function setCached<T>(cache: Map<string, CacheEntry<T>>, key: string, data: T): 
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' })
+})
+
+registerAuthRoutes({
+  app,
+  docClient,
+})
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/auth/login' || req.path === '/auth/me' || req.path === '/auth/logout') {
+    return next()
+  }
+  return requireSession(req, res, next)
+})
+
+registerModelPerformanceRoutes({
+  app,
+  docClient,
+  dataLabelsTable: DATA_LABELS_TABLE,
 })
 
 // Get list of devices from S3 bucket (folder names)
@@ -1263,11 +1301,14 @@ if (process.env.NODE_ENV === 'production') {
   })
 }
 
-app.listen(Number(PORT), HOST, () => {
-  console.log(`🚀 Server running on http://${HOST}:${PORT}`)
-  console.log(`📊 Ad Statistics Monitor API ready`)
-  if (process.env.NODE_ENV === 'production') {
-    console.log(`🌐 Access from network: http://<your-ip>:${PORT}`)
-  }
-})
+if (process.env.NETLIFY !== 'true' && process.env.AWS_LAMBDA_FUNCTION_NAME === undefined) {
+  app.listen(Number(PORT), HOST, () => {
+    console.log(`🚀 Server running on http://${HOST}:${PORT}`)
+    console.log(`📊 Ad Statistics Monitor API ready`)
+    if (process.env.NODE_ENV === 'production') {
+      console.log(`🌐 Access from network: http://<your-ip>:${PORT}`)
+    }
+  })
+}
 
+export default app

@@ -1,7 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface TimeSeriesItem {
   timestamp: string
@@ -85,7 +84,7 @@ export default function AdDurationGraph({ deviceId }: AdDurationGraphProps) {
       setLoading(true)
       setError(null)
       try {
-        const response = await fetch(`${API_URL}/api/stats/device/${deviceId}/timeseries`)
+        const response = await apiFetch(`${API_URL}/api/stats/device/${deviceId}/timeseries`)
         if (!response.ok) {
           throw new Error('Failed to fetch time series data')
         }
@@ -651,4 +650,3 @@ export default function AdDurationGraph({ deviceId }: AdDurationGraphProps) {
     </div>
   )
 }
-

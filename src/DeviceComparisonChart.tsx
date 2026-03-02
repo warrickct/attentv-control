@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import './App.css'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface DeviceComparison {
   deviceId: string
@@ -22,7 +21,7 @@ export default function DeviceComparisonChart() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/devices/comparison`)
+        const response = await apiFetch(`${API_URL}/api/stats/devices/comparison`)
         if (!response.ok) {
           throw new Error('Failed to fetch device comparison')
         }
@@ -138,4 +137,3 @@ export default function DeviceComparisonChart() {
     </div>
   )
 }
-

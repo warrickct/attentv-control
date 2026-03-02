@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import './App.css'
-
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.PROD ? '' : 'http://localhost:3001')
+import { API_URL, apiFetch } from './api'
 
 interface AdLeaderboardItem {
   adFilename: string
@@ -27,7 +26,7 @@ export default function TopAdsLeaderboard() {
       try {
         setLoading(true)
         setError(null)
-        const response = await fetch(`${API_URL}/api/stats/ads/leaderboard?limit=${limit}&sortBy=${sortBy}`)
+        const response = await apiFetch(`${API_URL}/api/stats/ads/leaderboard?limit=${limit}&sortBy=${sortBy}`)
         if (!response.ok) {
           throw new Error('Failed to fetch ads leaderboard')
         }
@@ -151,4 +150,3 @@ export default function TopAdsLeaderboard() {
     </div>
   )
 }
-
