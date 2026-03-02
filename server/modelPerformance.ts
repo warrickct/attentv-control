@@ -258,9 +258,10 @@ async function fetchAvailableChannels(): Promise<string[]> {
 
   const pool = await getPool()
   const result = await pool.query<{ channel: string }>(`
-    SELECT DISTINCT channel::text AS channel
+    SELECT channel::text AS channel
     FROM comskip_ground_truth_recordings
-    ORDER BY channel::int
+    GROUP BY channel
+    ORDER BY channel
   `)
   const channels = result.rows.map((row) => row.channel)
   setCached(cacheKey, channels)
