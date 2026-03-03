@@ -3,6 +3,7 @@ import {
   addBucketStart,
   formatInTimeZone,
   getTimeZoneDateParts,
+  parseTimestampInTimeZone,
   startOfBucket,
   toIsoString,
 } from './timezone'
@@ -12,6 +13,10 @@ export const SHORT_TERM_WINDOWS = [
   { key: '1h', label: 'Last 1h', durationMs: 60 * 60 * 1000 },
   { key: '24h', label: 'Last 24h', durationMs: 24 * 60 * 60 * 1000 },
 ] as const
+
+export const MODEL_PERFORMANCE_CHANNELS = ['7', '9', '10', '95'] as const
+export const MODEL_INFERENCE_START_HOUR = 11
+export const MODEL_INFERENCE_END_HOUR = 24
 
 export const TREND_RANGES = [
   { key: '7d', label: '7d', durationMs: 7 * 24 * 60 * 60 * 1000 },
@@ -54,6 +59,7 @@ export const DURATION_BUCKETS = [
 const MIN_GROUND_TRUTH_SECONDS = 30
 const MIN_GROUND_TRUTH_BREAKS = 2
 const MIN_MODEL_SECONDS = 30
+const MODEL_PERFORMANCE_CHANNEL_SET = new Set<string>(MODEL_PERFORMANCE_CHANNELS)
 
 export type ShortTermWindowKey = (typeof SHORT_TERM_WINDOWS)[number]['key']
 export type TrendRangeKey = (typeof TREND_RANGES)[number]['key']
@@ -129,6 +135,7 @@ export interface BreakComparison {
 export interface PerformanceMetrics {
   windowStartMs: number
   windowEndMs: number
+  scheduledWindowSeconds: number
   groundTruthSeconds: number
   modelSeconds: number
   overlapSeconds: number
@@ -303,6 +310,102 @@ export function clipInterval<T extends Interval>(interval: T, windowStartMs: num
   }
 }
 
+function formatTimeZoneDay(timestampMs: number, timeZone: string): string {
+  const parts = getTimeZoneDateParts(new Date(timestampMs), timeZone)
+  return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}-${parts.day
+    .toString()
+    .padStart(2, '0')}`
+}
+
+function formatHourComponent(hour: number): string {
+  return hour.toString().padStart(2, '0')
+}
+
+export function isSupportedModelChannel(channel: string): boolean {
+  return MODEL_PERFORMANCE_CHANNEL_SET.has(channel)
+}
+
+export function isModelInferenceHour(hour: number): boolean {
+  return hour >= MODEL_INFERENCE_START_HOUR && hour < MODEL_INFERENCE_END_HOUR
+}
+
+export function buildModelInferenceRanges(
+  windowStartMs: number,
+  windowEndMs: number,
+  timeZone: string = DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
+): MergedRange[] {
+  if (windowEndMs <= windowStartMs) {
+    return []
+  }
+
+  const ranges: MergedRange[] = []
+  let cursorMs = startOfBucket(windowStartMs, '1d', timeZone)
+
+  while (cursorMs < windowEndMs) {
+    const dayEndMs = addBucketStart(cursorMs, '1d', timeZone)
+    const dayString = formatTimeZoneDay(cursorMs, timeZone)
+    const activeStart = parseTimestampInTimeZone(
+      `${dayString}T${formatHourComponent(MODEL_INFERENCE_START_HOUR)}:00:00`,
+      timeZone,
+    )
+
+    if (activeStart) {
+      const activeStartMs = activeStart.getTime()
+      const rangeStartMs = Math.max(windowStartMs, activeStartMs)
+      const rangeEndMs = Math.min(windowEndMs, dayEndMs)
+
+      if (rangeEndMs > rangeStartMs) {
+        ranges.push({
+          startMs: rangeStartMs,
+          endMs: rangeEndMs,
+        })
+      }
+    }
+
+    cursorMs = dayEndMs
+  }
+
+  return ranges
+}
+
+export function computeScheduledWindowSeconds(
+  windowStartMs: number,
+  windowEndMs: number,
+  timeZone: string = DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
+): number {
+  return roundNumber(totalRangeSeconds(buildModelInferenceRanges(windowStartMs, windowEndMs, timeZone)), 4) ?? 0
+}
+
+export function clipIntervalsToModelInferenceWindow<T extends Interval>(
+  intervals: ReadonlyArray<T>,
+  windowStartMs: number,
+  windowEndMs: number,
+  timeZone: string = DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
+): T[] {
+  const activeRanges = buildModelInferenceRanges(windowStartMs, windowEndMs, timeZone)
+  if (activeRanges.length === 0 || intervals.length === 0) {
+    return []
+  }
+
+  const clippedIntervals: T[] = []
+  for (const interval of intervals) {
+    for (const activeRange of activeRanges) {
+      const clipped = clipInterval(interval, activeRange.startMs, activeRange.endMs)
+      if (!clipped) {
+        continue
+      }
+
+      clippedIntervals.push(
+        clipped.startMs !== interval.startMs || clipped.endMs !== interval.endMs
+          ? { ...clipped, sourceId: `${interval.sourceId}@${clipped.startMs}` }
+          : clipped,
+      )
+    }
+  }
+
+  return clippedIntervals
+}
+
 export function mergeRanges(intervals: ReadonlyArray<Interval>): MergedRange[] {
   if (intervals.length === 0) {
     return []
@@ -470,6 +573,7 @@ export function computePerformanceMetrics(
   breakComparisons: ReadonlyArray<BreakComparison> = buildBreakComparisons(truthIntervals, modelIntervals),
   windowStartMs: number = truthIntervals[0]?.startMs ?? modelIntervals[0]?.startMs ?? Date.now(),
   windowEndMs: number = truthIntervals[truthIntervals.length - 1]?.endMs ?? modelIntervals[modelIntervals.length - 1]?.endMs ?? Date.now(),
+  timeZone: string = DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
 ): PerformanceMetrics {
   const mergedTruthRanges = mergeRanges(truthIntervals)
   const mergedModelRanges = mergeRanges(modelIntervals)
@@ -493,6 +597,7 @@ export function computePerformanceMetrics(
   return {
     windowStartMs,
     windowEndMs,
+    scheduledWindowSeconds: computeScheduledWindowSeconds(windowStartMs, windowEndMs, timeZone),
     groundTruthSeconds: roundNumber(truthSeconds, 4) ?? 0,
     modelSeconds: roundNumber(modelSeconds, 4) ?? 0,
     overlapSeconds: roundNumber(overlapTotalSeconds, 4) ?? 0,
@@ -514,10 +619,15 @@ export function computePerformanceMetrics(
   }
 }
 
-export function emptyPerformanceMetrics(windowStartMs: number, windowEndMs: number): PerformanceMetrics {
+export function emptyPerformanceMetrics(
+  windowStartMs: number,
+  windowEndMs: number,
+  timeZone: string = DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
+): PerformanceMetrics {
   return {
     windowStartMs,
     windowEndMs,
+    scheduledWindowSeconds: computeScheduledWindowSeconds(windowStartMs, windowEndMs, timeZone),
     groundTruthSeconds: 0,
     modelSeconds: 0,
     overlapSeconds: 0,
@@ -661,6 +771,10 @@ export function evaluateAlerts(params: {
   const { current, baseline7d, baseline30d, latestDetectionAgeMs = null, staleThresholdMs = 30 * 60 * 1000 } = params
   const alerts: PerformanceAlert[] = []
   const baseline = baseline30d.sampleCount > 0 ? baseline30d : baseline7d
+
+  if (current.scheduledWindowSeconds <= 0) {
+    return alerts
+  }
 
   if (current.groundTruthSeconds >= MIN_GROUND_TRUTH_SECONDS || current.totalGroundTruthBreaks >= MIN_GROUND_TRUTH_BREAKS) {
     pushAlert(
@@ -814,6 +928,11 @@ export function buildTrendPoints(params: {
 
   while (bucketStartMs < rangeEndMs) {
     const bucketEndMs = Math.min(addBucketStart(bucketStartMs, bucketKey, timeZone), rangeEndMs)
+    const scheduledWindowSeconds = computeScheduledWindowSeconds(bucketStartMs, bucketEndMs, timeZone)
+    if (scheduledWindowSeconds <= 0) {
+      bucketStartMs = bucketEndMs
+      continue
+    }
     const clippedTruth = truthIntervals
       .map((interval) => clipInterval(interval, bucketStartMs, bucketEndMs))
       .filter((interval): interval is TruthInterval => interval !== null)
@@ -825,8 +944,8 @@ export function buildTrendPoints(params: {
     )
     const metrics =
       clippedTruth.length > 0 || clippedModel.length > 0 || bucketBreakComparisons.length > 0
-        ? computePerformanceMetrics(clippedTruth, clippedModel, bucketBreakComparisons, bucketStartMs, bucketEndMs)
-        : emptyPerformanceMetrics(bucketStartMs, bucketEndMs)
+        ? computePerformanceMetrics(clippedTruth, clippedModel, bucketBreakComparisons, bucketStartMs, bucketEndMs, timeZone)
+        : emptyPerformanceMetrics(bucketStartMs, bucketEndMs, timeZone)
 
     points.push({
       ...metrics,

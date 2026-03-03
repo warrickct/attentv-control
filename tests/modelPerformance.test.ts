@@ -54,6 +54,7 @@ function makeMetrics(overrides: Partial<PerformanceMetrics>): PerformanceMetrics
   return {
     windowStartMs: 0,
     windowEndMs: 60_000,
+    scheduledWindowSeconds: 3_600,
     groundTruthSeconds: 120,
     modelSeconds: 100,
     overlapSeconds: 80,
@@ -157,6 +158,29 @@ test('evaluateAlerts triggers recall and model-only warnings only when sample si
   assert.ok(alerts.some((alert) => alert.metricKey === 'recallBySeconds'))
   assert.ok(alerts.some((alert) => alert.metricKey === 'precisionBySeconds'))
   assert.ok(alerts.some((alert) => alert.metricKey === 'falsePositiveSeconds'))
+})
+
+test('evaluateAlerts ignores windows outside the scheduled inference hours', () => {
+  const baseline30d = createBaselineSummary('30d', [makeMetrics({ recallBySeconds: 0.8, precisionBySeconds: 0.8 })])
+  const baseline7d = createBaselineSummary('7d', [makeMetrics({ recallBySeconds: 0.8, precisionBySeconds: 0.8 })])
+  const current = makeMetrics({
+    scheduledWindowSeconds: 0,
+    recallBySeconds: 0,
+    precisionBySeconds: 0,
+    breakHitRate: 0,
+    groundTruthSeconds: 180,
+    totalGroundTruthBreaks: 6,
+    totalModelIntervals: 0,
+  })
+
+  const alerts = evaluateAlerts({
+    current,
+    baseline7d,
+    baseline30d,
+    latestDetectionAgeMs: 6 * 60 * 60 * 1000,
+  })
+
+  assert.equal(alerts.length, 0)
 })
 
 test('integration path computes metrics from truth breaks and normalized model intervals', () => {

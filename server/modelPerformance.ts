@@ -22,6 +22,7 @@ import {
   type TrendRangeKey,
   type TrendsResponse,
   type TruthInterval,
+  MODEL_PERFORMANCE_CHANNELS,
   SHORT_TERM_WINDOWS,
   buildRecordingBreakdown,
   buildBreakComparisons,
@@ -29,9 +30,12 @@ import {
   buildHourOfDayBreakdown,
   buildTrendPoints,
   clipInterval,
+  clipIntervalsToModelInferenceWindow,
+  computeScheduledWindowSeconds,
   computePerformanceMetrics,
   createBaselineSummary,
   emptyPerformanceMetrics,
+  isSupportedModelChannel,
   normalizeRecordingLookupValue,
   summarizeWindowComparisons,
 } from '../shared/modelPerformance'
@@ -130,7 +134,12 @@ function normalizeChannelValue(channel: unknown): string {
     throw new Error(`Invalid channel: ${String(channel)}`)
   }
 
-  return String(numericValue)
+  const normalizedValue = String(numericValue)
+  if (!isSupportedModelChannel(normalizedValue)) {
+    throw new Error(`Unsupported model performance channel: ${normalizedValue}`)
+  }
+
+  return normalizedValue
 }
 
 function parseBoolean(value: unknown, defaultValue: boolean = false): boolean {
@@ -260,16 +269,13 @@ async function fetchAvailableChannels(): Promise<string[]> {
     return cached
   }
 
-  const pool = await getPool()
-  const result = await pool.query<{ channel: string }>(`
-    SELECT channel::text AS channel
-    FROM comskip_ground_truth_recordings
-    GROUP BY channel
-    ORDER BY channel
-  `)
-  const channels = result.rows.map((row) => row.channel)
+  const channels = [...MODEL_PERFORMANCE_CHANNELS]
   setCached(cacheKey, channels)
   return channels
+}
+
+function resolveRequestedChannels(channel: string): string[] {
+  return channel === 'all' ? [...MODEL_PERFORMANCE_CHANNELS] : [channel]
 }
 
 function buildTruthInterval(row: Record<string, unknown>): TruthInterval {
@@ -297,7 +303,7 @@ function buildTruthInterval(row: Record<string, unknown>): TruthInterval {
 
 async function fetchTruthIntervals(channel: string, windowStartMs: number, windowEndMs: number): Promise<TruthInterval[]> {
   const pool = await getPool()
-  const channelValue = channel === 'all' ? null : Number.parseInt(channel, 10)
+  const channelValues = resolveRequestedChannels(channel).map((value) => Number.parseInt(value, 10))
   const result = await pool.query<Record<string, unknown>>(`
     SELECT
       r.recording_id,
@@ -315,12 +321,12 @@ async function fetchTruthIntervals(channel: string, windowStartMs: number, windo
     JOIN comskip_ground_truth_recordings r ON r.recording_id = b.recording_id
     WHERE b.played_at_end > $1
       AND b.played_at_start < $2
-      AND ($3::int IS NULL OR r.channel = $3)
+      AND r.channel = ANY($3::int[])
     ORDER BY r.channel, b.played_at_start, b.break_number
   `, [
     new Date(windowStartMs).toISOString(),
     new Date(windowEndMs).toISOString(),
-    channelValue,
+    channelValues,
   ])
 
   return result.rows.map((row) => buildTruthInterval(row as Record<string, unknown>))
@@ -344,19 +350,19 @@ function buildModelIntervalFromSqlRow(row: Record<string, unknown>): ModelInterv
 
 async function fetchModelIntervalsFromSql(channel: string, windowStartMs: number, windowEndMs: number): Promise<ModelInterval[]> {
   const pool = await getPool()
-  const channelValue = channel === 'all' ? null : Number.parseInt(channel, 10)
+  const channelValues = resolveRequestedChannels(channel).map((value) => Number.parseInt(value, 10))
   const result = await pool.query<Record<string, unknown>>(`
     SELECT id, channel, started_at, ended_at, is_test, user_name, source
     FROM model_detection_events
     WHERE ended_at > $1
       AND started_at < $2
-      AND ($3::int IS NULL OR channel = $3)
+      AND channel = ANY($3::int[])
       AND COALESCE(is_test, false) = false
     ORDER BY channel, started_at
   `, [
     new Date(windowStartMs).toISOString(),
     new Date(windowEndMs).toISOString(),
-    channelValue,
+    channelValues,
   ])
 
   return result.rows.map((row) => buildModelIntervalFromSqlRow(row as Record<string, unknown>))
@@ -445,6 +451,7 @@ async function fetchModelIntervalsFromDynamo(params: {
     .map((item) => buildModelIntervalFromDynamoItem(item, timeZone))
     .filter((interval): interval is ModelInterval => interval !== null)
     .filter((interval) => interval.metadata.isTest !== true)
+    .filter((interval) => isSupportedModelChannel(String(interval.metadata.channel)))
     .filter((interval) => interval.endMs > windowStartMs && interval.startMs < windowEndMs)
 }
 
@@ -454,21 +461,26 @@ async function fetchLatestModelDetectionAt(channel: string): Promise<number | nu
   }
 
   const pool = await getPool()
-  const channelValue = channel === 'all' ? null : Number.parseInt(channel, 10)
+  const channelValues = resolveRequestedChannels(channel).map((value) => Number.parseInt(value, 10))
   const result = await pool.query<{ latest_model_interval_at: string | null }>(`
     SELECT MAX(ended_at) AS latest_model_interval_at
     FROM model_detection_events
-    WHERE ($1::int IS NULL OR channel = $1)
+    WHERE channel = ANY($1::int[])
       AND COALESCE(is_test, false) = false
-  `, [channelValue])
+  `, [channelValues])
 
   const rawValue = result.rows[0]?.latest_model_interval_at
   return rawValue ? new Date(rawValue).getTime() : null
 }
 
-function aggregateRowsToMetrics(rows: AggregateMetricRow[], windowStartMs: number, windowEndMs: number): PerformanceMetrics {
+function aggregateRowsToMetrics(
+  rows: AggregateMetricRow[],
+  windowStartMs: number,
+  windowEndMs: number,
+  timeZone: string,
+): PerformanceMetrics {
   if (rows.length === 0) {
-    return emptyPerformanceMetrics(windowStartMs, windowEndMs)
+    return emptyPerformanceMetrics(windowStartMs, windowEndMs, timeZone)
   }
 
   const groundTruthSeconds = rows.reduce((total, row) => total + row.metrics.groundTruthSeconds, 0)
@@ -487,6 +499,7 @@ function aggregateRowsToMetrics(rows: AggregateMetricRow[], windowStartMs: numbe
   return {
     windowStartMs,
     windowEndMs,
+    scheduledWindowSeconds: computeScheduledWindowSeconds(windowStartMs, windowEndMs, timeZone),
     groundTruthSeconds,
     modelSeconds,
     overlapSeconds,
@@ -530,6 +543,7 @@ function mapAggregateRow(row: Record<string, unknown>): AggregateMetricRow {
     metrics: {
       windowStartMs: new Date(String(row.bucket_start)).getTime(),
       windowEndMs: new Date(String(row.bucket_end)).getTime(),
+      scheduledWindowSeconds: 0,
       groundTruthSeconds: Number(row.ground_truth_seconds ?? 0),
       modelSeconds: Number(row.model_seconds ?? 0),
       overlapSeconds: Number(row.overlap_seconds ?? 0),
@@ -602,7 +616,7 @@ async function fetchAggregateMetricRows(
   }
 
   const pool = await getPool()
-  const channelValue = channel === 'all' ? null : Number.parseInt(channel, 10)
+  const channelValues = resolveRequestedChannels(channel).map((value) => Number.parseInt(value, 10))
   const result = await pool.query<Record<string, unknown>>(`
     SELECT
       channel::text AS channel,
@@ -633,12 +647,12 @@ async function fetchAggregateMetricRows(
     FROM ${tableName}
     WHERE bucket_start >= $1
       AND bucket_start < $2
-      AND ($3::int IS NULL OR channel = $3)
+      AND channel = ANY($3::int[])
     ORDER BY bucket_start, channel
   `, [
     new Date(rangeStartMs).toISOString(),
     new Date(rangeEndMs).toISOString(),
-    channelValue,
+    channelValues,
   ])
 
   if (result.rows.length === 0) {
@@ -672,19 +686,23 @@ function createWindowData(
   modelIntervals: ModelInterval[],
   windowStartMs: number,
   windowEndMs: number,
+  timeZone: string,
 ): WindowData {
-  const breakComparisons = buildBreakComparisons(truthIntervals, modelIntervals)
+  const filteredTruthIntervals = clipIntervalsToModelInferenceWindow(truthIntervals, windowStartMs, windowEndMs, timeZone)
+  const filteredModelIntervals = clipIntervalsToModelInferenceWindow(modelIntervals, windowStartMs, windowEndMs, timeZone)
+  const breakComparisons = buildBreakComparisons(filteredTruthIntervals, filteredModelIntervals)
   const metrics = computePerformanceMetrics(
-    truthIntervals,
-    modelIntervals,
+    filteredTruthIntervals,
+    filteredModelIntervals,
     breakComparisons,
     windowStartMs,
     windowEndMs,
+    timeZone,
   )
 
   return {
-    truthIntervals,
-    modelIntervals,
+    truthIntervals: filteredTruthIntervals,
+    modelIntervals: filteredModelIntervals,
     breakComparisons,
     metrics,
   }
@@ -714,6 +732,7 @@ async function loadWindowData(params: {
     modelIntervals,
     params.windowStartMs,
     params.windowEndMs,
+    params.timeZone,
   )
   setCached(cacheKey, windowData)
   return windowData
@@ -738,29 +757,40 @@ function mapAggregateRowsToTrendPoints(
     }
   }
 
-  return Array.from(grouped.values())
-    .map((bucketRows) => {
-      const metrics =
-        bucketRows.length === 1 && !combineAcrossChannels
-          ? bucketRows[0].metrics
-          : aggregateRowsToMetrics(bucketRows, bucketRows[0].bucketStartMs, bucketRows[0].bucketEndMs)
+  const points: TrendPoint[] = []
 
-      return {
-        ...metrics,
-        bucketKey,
-        bucketStart: toIsoString(bucketRows[0].bucketStartMs),
-        bucketEnd: toIsoString(bucketRows[0].bucketEndMs),
-        label: bucketKey === '1d'
-          ? new Intl.DateTimeFormat('en-AU', { timeZone, year: 'numeric', month: 'short', day: 'numeric' }).format(
-              new Date(bucketRows[0].bucketStartMs),
-            )
-          : new Intl.DateTimeFormat('en-AU', { timeZone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(
-              new Date(bucketRows[0].bucketStartMs),
-            ),
-        warnings: [],
-      }
+  for (const bucketRows of grouped.values()) {
+    const scheduledWindowSeconds = computeScheduledWindowSeconds(
+      bucketRows[0].bucketStartMs,
+      bucketRows[0].bucketEndMs,
+      timeZone,
+    )
+    if (scheduledWindowSeconds <= 0) {
+      continue
+    }
+
+    const metrics =
+      bucketRows.length === 1 && !combineAcrossChannels
+        ? { ...bucketRows[0].metrics, scheduledWindowSeconds }
+        : aggregateRowsToMetrics(bucketRows, bucketRows[0].bucketStartMs, bucketRows[0].bucketEndMs, timeZone)
+
+    points.push({
+      ...metrics,
+      bucketKey,
+      bucketStart: toIsoString(bucketRows[0].bucketStartMs),
+      bucketEnd: toIsoString(bucketRows[0].bucketEndMs),
+      label: bucketKey === '1d'
+        ? new Intl.DateTimeFormat('en-AU', { timeZone, year: 'numeric', month: 'short', day: 'numeric' }).format(
+            new Date(bucketRows[0].bucketStartMs),
+          )
+        : new Intl.DateTimeFormat('en-AU', { timeZone, month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(
+            new Date(bucketRows[0].bucketStartMs),
+          ),
+      warnings: [],
     })
-    .sort((left, right) => new Date(left.bucketStart).getTime() - new Date(right.bucketStart).getTime())
+  }
+
+  return points.sort((left, right) => new Date(left.bucketStart).getTime() - new Date(right.bucketStart).getTime())
 }
 
 function getRangeBounds(
@@ -852,6 +882,9 @@ async function fetchRecordingInspectionScope(
   const recordingRow = recordingResult.rows[0]
   if (!recordingRow) {
     throw new Error(`No comskip ground truth recording found for ${normalizedRecordingName}.`)
+  }
+  if (!isSupportedModelChannel(String(recordingRow.channel))) {
+    throw new Error(`Recording ${normalizedRecordingName} is not on a channel with active inference.`)
   }
 
   const recordingStartedAt = new Date(String(recordingRow.recording_started_at))
@@ -1206,11 +1239,17 @@ async function getChannelBreakdown(params: {
   const baseline30ByChannel = new Map<string, PerformanceMetrics[]>()
 
   for (const row of baseline7Rows ?? []) {
+    if (computeScheduledWindowSeconds(row.bucketStartMs, row.bucketEndMs, params.timeZone) <= 0) {
+      continue
+    }
     const list = baseline7ByChannel.get(row.channel) ?? []
     list.push(row.metrics)
     baseline7ByChannel.set(row.channel, list)
   }
   for (const row of baseline30Rows ?? []) {
+    if (computeScheduledWindowSeconds(row.bucketStartMs, row.bucketEndMs, params.timeZone) <= 0) {
+      continue
+    }
     const list = baseline30ByChannel.get(row.channel) ?? []
     list.push(row.metrics)
     baseline30ByChannel.set(row.channel, list)
@@ -1236,6 +1275,7 @@ async function getChannelBreakdown(params: {
       breakComparisons,
       currentWindowStartMs,
       now,
+      params.timeZone,
     )
     const baseline7d = createBaselineSummary('7d', baseline7ByChannel.get(channel) ?? [])
     const baseline30d = createBaselineSummary('30d', baseline30ByChannel.get(channel) ?? [])
@@ -1272,6 +1312,7 @@ async function getChannelBreakdown(params: {
             breakHitRate: point.breakHitRate,
           }))
         : (sparklineByChannel.get(channel) ?? [])
+            .filter((row) => computeScheduledWindowSeconds(row.bucketStartMs, row.bucketEndMs, params.timeZone) > 0)
             .sort((left, right) => left.bucketStartMs - right.bucketStartMs)
             .map((row) => ({
               bucketStart: toIsoString(row.bucketStartMs),
@@ -1334,7 +1375,13 @@ async function getPerformanceDetail(params: {
       windowEndMs,
       timeZone: params.timeZone,
     })
-    windowData = createWindowData(recordingScope.truthIntervals, modelIntervals, windowStartMs, windowEndMs)
+    windowData = createWindowData(
+      recordingScope.truthIntervals,
+      modelIntervals,
+      windowStartMs,
+      windowEndMs,
+      params.timeZone,
+    )
     scope = {
       type: 'recording',
       label: recordingScope.normalizedRecordingName,

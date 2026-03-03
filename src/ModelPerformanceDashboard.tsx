@@ -14,6 +14,7 @@ import type {
   DetailScopeType,
   OverviewResponse,
   PerformanceAlert,
+  PerformanceMetrics,
   ShortTermWindowKey,
   TrendBucketKey,
   TrendRangeKey,
@@ -21,6 +22,10 @@ import type {
 } from '../shared/modelPerformance'
 import {
   DETAIL_SCOPES,
+  isModelInferenceHour,
+  MODEL_INFERENCE_END_HOUR,
+  MODEL_INFERENCE_START_HOUR,
+  MODEL_PERFORMANCE_CHANNELS,
   SHORT_TERM_WINDOWS,
   TREND_BUCKETS,
   TREND_RANGES,
@@ -35,17 +40,65 @@ import { API_URL, apiFetch } from './api'
 const TREND_CHARTS: Array<{
   key: string
   title: string
+  description: string
   dataKey: string
   color: string
   type: 'percent' | 'seconds'
 }> = [
-  { key: 'recall', title: 'Recall by Seconds', dataKey: 'recallBySecondsPct', color: '#1976d2', type: 'percent' },
-  { key: 'precision', title: 'Precision by Seconds', dataKey: 'precisionBySecondsPct', color: '#2e7d32', type: 'percent' },
-  { key: 'breakHitRate', title: 'Break Hit Rate', dataKey: 'breakHitRatePct', color: '#f9a825', type: 'percent' },
-  { key: 'missedSeconds', title: 'Missed Ground-Truth Seconds', dataKey: 'missedSeconds', color: '#d32f2f', type: 'seconds' },
-  { key: 'modelOnly', title: 'Model-Only Seconds', dataKey: 'falsePositiveSeconds', color: '#6a1b9a', type: 'seconds' },
-  { key: 'latency', title: 'Average Start Latency', dataKey: 'averageStartLatencySec', color: '#455a64', type: 'seconds' },
+  {
+    key: 'recall',
+    title: 'Captured Real Break Time (Recall)',
+    description: 'Of the real ad-break seconds that happened, this shows how many the model actually caught.',
+    dataKey: 'recallBySecondsPct',
+    color: '#1976d2',
+    type: 'percent',
+  },
+  {
+    key: 'precision',
+    title: 'Detected Time That Was Truly a Break (Precision)',
+    description: 'Of the seconds the model flagged, this shows how many were genuinely part of a real break.',
+    dataKey: 'precisionBySecondsPct',
+    color: '#2e7d32',
+    type: 'percent',
+  },
+  {
+    key: 'breakHitRate',
+    title: 'Breaks Touched At Least Once',
+    description: 'Of the real breaks that occurred, this shows how many had at least one overlapping model detection.',
+    dataKey: 'breakHitRatePct',
+    color: '#f9a825',
+    type: 'percent',
+  },
+  {
+    key: 'missedSeconds',
+    title: 'Missed Real Break Seconds',
+    description: 'Real ad-break time that happened but had no overlapping model detection.',
+    dataKey: 'missedSeconds',
+    color: '#d32f2f',
+    type: 'seconds',
+  },
+  {
+    key: 'modelOnly',
+    title: 'Model-Only Seconds',
+    description: 'Time the model flagged as a break that did not overlap any real break.',
+    dataKey: 'falsePositiveSeconds',
+    color: '#6a1b9a',
+    type: 'seconds',
+  },
+  {
+    key: 'latency',
+    title: 'Average Start Delay',
+    description: 'How late the model started detecting after the real break began. Lower is better.',
+    dataKey: 'averageStartLatencySec',
+    color: '#455a64',
+    type: 'seconds',
+  },
 ]
+
+const SUPPORTED_CHANNEL_LIST = MODEL_PERFORMANCE_CHANNELS.join(', ')
+const MODEL_SCHEDULE_LABEL = `${MODEL_INFERENCE_START_HOUR}:00 ${MODEL_INFERENCE_START_HOUR < 12 ? 'am' : 'pm'} to ${
+  MODEL_INFERENCE_END_HOUR === 24 ? 'midnight' : `${MODEL_INFERENCE_END_HOUR}:00`
+}`
 
 function getTodayInTimeZone(timeZone: string): string {
   const parts = getTimeZoneDateParts(new Date(), timeZone)
@@ -177,6 +230,25 @@ function metricDeltaClass(current: number | null | undefined, baseline: number |
   return current >= baseline ? 'positive' : 'negative'
 }
 
+function isScheduledWindow(metrics: PerformanceMetrics | null | undefined): boolean {
+  return Boolean(metrics && metrics.scheduledWindowSeconds > 0)
+}
+
+function formatPercentForWindow(metrics: PerformanceMetrics | null | undefined, value: number | null | undefined): string {
+  return isScheduledWindow(metrics) ? formatPercent(value) : 'Not scheduled'
+}
+
+function formatSecondsForWindow(metrics: PerformanceMetrics | null | undefined, value: number | null | undefined): string {
+  return isScheduledWindow(metrics) ? formatSeconds(value) : 'Not scheduled'
+}
+
+function formatDeltaForWindow(
+  metrics: PerformanceMetrics | null | undefined,
+  value: number | null | undefined,
+): string {
+  return isScheduledWindow(metrics) ? formatDeltaPercentPoints(value) : 'N/A'
+}
+
 function TimelineLane({
   label,
   intervals,
@@ -248,12 +320,14 @@ function TimelineAxis({
 
 function MetricChartCard({
   title,
+  description,
   data,
   dataKey,
   color,
   type,
 }: {
   title: string
+  description: string
   data: Array<Record<string, unknown>>
   dataKey: string
   color: string
@@ -262,6 +336,7 @@ function MetricChartCard({
   return (
     <div className="chart-item">
       <h3>{title}</h3>
+      <p className="chart-description">{description}</p>
       <ResponsiveContainer width="100%" height={240}>
         <LineChart data={data} margin={{ top: 10, right: 20, left: 0, bottom: 5 }}>
           <CartesianGrid strokeDasharray="3 3" />
@@ -309,16 +384,23 @@ function OverviewWindowCard({
   const current = window.current
   const baseline7d = window.baseline7d.metrics
   const baseline30d = window.baseline30d.metrics
+  const outsideSchedule = !isScheduledWindow(current)
 
   return (
     <div className="model-window-card">
       <div className="model-window-header">
         <div>
           <h3>{window.label}</h3>
-          <p>Current performance vs 7d and 30d baselines</p>
+          <p>
+            {outsideSchedule
+              ? 'This window falls fully outside the scheduled inference hours.'
+              : 'Current performance vs 7d and 30d baselines'}
+          </p>
         </div>
         <div className="alert-chip-list">
-          {window.warnings.length === 0 ? (
+          {outsideSchedule ? (
+            <span className="alert-chip info">Outside schedule</span>
+          ) : window.warnings.length === 0 ? (
             <span className="alert-chip info">Healthy</span>
           ) : (
             window.warnings.map((warning) => (
@@ -330,58 +412,64 @@ function OverviewWindowCard({
         </div>
       </div>
 
+      {outsideSchedule && (
+        <div className="model-info-note">
+          No score is shown here because the model is only meant to run from 11:00 to midnight, Australia/Sydney time.
+        </div>
+      )}
+
       <div className="model-kpi-grid">
         <div className="model-kpi-card">
-          <div className="summary-label">Recall by Seconds</div>
-          <div className="summary-value small">{formatPercent(current.recallBySeconds)}</div>
+          <div className="summary-label">Captured Real Break Time (Recall)</div>
+          <div className="summary-value small">{formatPercentForWindow(current, current.recallBySeconds)}</div>
           <div className="model-kpi-baselines">
             <span className={metricDeltaClass(current.recallBySeconds, baseline7d.recallBySeconds.average)}>
-              7d {formatPercent(baseline7d.recallBySeconds.average)}
+              7d usual {formatPercent(baseline7d.recallBySeconds.average)}
             </span>
             <span className={metricDeltaClass(current.recallBySeconds, baseline30d.recallBySeconds.average)}>
-              30d {formatPercent(baseline30d.recallBySeconds.average)}
+              30d usual {formatPercent(baseline30d.recallBySeconds.average)}
             </span>
           </div>
         </div>
         <div className="model-kpi-card">
-          <div className="summary-label">Precision by Seconds</div>
-          <div className="summary-value small">{formatPercent(current.precisionBySeconds)}</div>
+          <div className="summary-label">Detected Time That Was Real (Precision)</div>
+          <div className="summary-value small">{formatPercentForWindow(current, current.precisionBySeconds)}</div>
           <div className="model-kpi-baselines">
             <span className={metricDeltaClass(current.precisionBySeconds, baseline7d.precisionBySeconds.average)}>
-              7d {formatPercent(baseline7d.precisionBySeconds.average)}
+              7d usual {formatPercent(baseline7d.precisionBySeconds.average)}
             </span>
             <span className={metricDeltaClass(current.precisionBySeconds, baseline30d.precisionBySeconds.average)}>
-              30d {formatPercent(baseline30d.precisionBySeconds.average)}
+              30d usual {formatPercent(baseline30d.precisionBySeconds.average)}
             </span>
           </div>
         </div>
         <div className="model-kpi-card">
-          <div className="summary-label">Break Hit Rate</div>
-          <div className="summary-value small">{formatPercent(current.breakHitRate)}</div>
+          <div className="summary-label">Breaks Touched At Least Once</div>
+          <div className="summary-value small">{formatPercentForWindow(current, current.breakHitRate)}</div>
           <div className="model-kpi-baselines">
             <span className={metricDeltaClass(current.breakHitRate, baseline7d.breakHitRate.average)}>
-              7d {formatPercent(baseline7d.breakHitRate.average)}
+              7d usual {formatPercent(baseline7d.breakHitRate.average)}
             </span>
             <span className={metricDeltaClass(current.breakHitRate, baseline30d.breakHitRate.average)}>
-              30d {formatPercent(baseline30d.breakHitRate.average)}
+              30d usual {formatPercent(baseline30d.breakHitRate.average)}
             </span>
           </div>
         </div>
         <div className="model-kpi-card">
-          <div className="summary-label">Overlap Seconds</div>
-          <div className="summary-value small">{formatSeconds(current.overlapSeconds)}</div>
+          <div className="summary-label">Seconds Correctly Captured</div>
+          <div className="summary-value small">{formatSecondsForWindow(current, current.overlapSeconds)}</div>
         </div>
         <div className="model-kpi-card">
-          <div className="summary-label">Missed Truth Seconds</div>
-          <div className="summary-value small">{formatSeconds(current.missedSeconds)}</div>
+          <div className="summary-label">Missed Real Break Seconds</div>
+          <div className="summary-value small">{formatSecondsForWindow(current, current.missedSeconds)}</div>
         </div>
         <div className="model-kpi-card">
           <div className="summary-label">Model-Only Seconds</div>
-          <div className="summary-value small">{formatSeconds(current.falsePositiveSeconds)}</div>
+          <div className="summary-value small">{formatSecondsForWindow(current, current.falsePositiveSeconds)}</div>
         </div>
         <div className="model-kpi-card">
-          <div className="summary-label">Avg Start Latency</div>
-          <div className="summary-value small">{formatSeconds(current.averageStartLatencySec)}</div>
+          <div className="summary-label">Average Start Delay</div>
+          <div className="summary-value small">{formatSecondsForWindow(current, current.averageStartLatencySec)}</div>
         </div>
       </div>
     </div>
@@ -462,6 +550,31 @@ function SqlMirrorStatusPanel({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function ModelReadingGuide() {
+  return (
+    <div className="model-guide-grid">
+      <div className="model-guide-card emphasis">
+        <h3>What Is Counted</h3>
+        <p>Only channels {SUPPORTED_CHANNEL_LIST} are scored here.</p>
+        <p>Only the scheduled inference window, {MODEL_SCHEDULE_LABEL} Australia/Sydney time, is included.</p>
+        <p>Overnight hours are excluded so the model is not penalized when it is intentionally off.</p>
+      </div>
+      <div className="model-guide-card">
+        <h3>Recall</h3>
+        <p>Recall asks: of the real ad-break time that happened, how much did the model catch?</p>
+      </div>
+      <div className="model-guide-card">
+        <h3>Precision</h3>
+        <p>Precision asks: of the time the model flagged as a break, how much was actually real?</p>
+      </div>
+      <div className="model-guide-card">
+        <h3>Break Hit Rate</h3>
+        <p>This counts whole breaks. If a real break got even one overlapping detection, it counts as a hit.</p>
+      </div>
     </div>
   )
 }
@@ -722,6 +835,20 @@ export default function ModelPerformanceDashboard() {
     }
   }, [detailChannel, channelBreakdown])
 
+  useEffect(() => {
+    if (channels.length === 0) {
+      return
+    }
+
+    if (selectedChannel !== 'all' && !channels.includes(selectedChannel)) {
+      setSelectedChannel('all')
+    }
+
+    if (detailChannel && !channels.includes(detailChannel)) {
+      setDetailChannel(channels[0])
+    }
+  }, [channels, detailChannel, selectedChannel])
+
   const trendChartData = useMemo(
     () =>
       (trends?.points || []).map((point) => ({
@@ -739,6 +866,15 @@ export default function ModelPerformanceDashboard() {
   const selectedBreakdownRow = useMemo(
     () => channelBreakdown?.channels.find((row) => row.channel === (channelDetail?.channel ?? detailChannel)) ?? null,
     [channelBreakdown, channelDetail?.channel, detailChannel],
+  )
+
+  const activeHourRows = useMemo(
+    () =>
+      (channelDetail?.hourOfDay ?? []).filter((row) => {
+        const hour = Number.parseInt(row.label.slice(0, 2), 10)
+        return isModelInferenceHour(hour)
+      }),
+    [channelDetail],
   )
 
   const detailWindow = useMemo(() => {
@@ -763,7 +899,8 @@ export default function ModelPerformanceDashboard() {
           <div>
             <h2>Model Performance</h2>
             <p className="model-performance-subtitle">
-              Shows how much of the real ad-break time the model actually captured, using mirrored SQL data.
+              Compares real ad breaks against model detections using mirrored SQL data, but only during the scheduled
+              inference window.
             </p>
           </div>
           <div className="refresh-controls">
@@ -782,7 +919,7 @@ export default function ModelPerformanceDashboard() {
               value={selectedChannel}
               onChange={(event) => setSelectedChannel(event.target.value)}
             >
-              <option value="all">All channels</option>
+              <option value="all">All live channels</option>
               {channels.map((channel) => (
                 <option key={channel} value={channel}>
                   Channel {channel}
@@ -866,14 +1003,17 @@ export default function ModelPerformanceDashboard() {
 
           <div className="control-info">
             <span>Timezone: {timezone}</span>
-            <span>Server-only access</span>
+            <span>Channels: {SUPPORTED_CHANNEL_LIST}</span>
+            <span>Inference window: {MODEL_SCHEDULE_LABEL}</span>
           </div>
         </div>
 
         <p className="model-performance-subtitle">
-          Recall = how much of the real ad-break time the model captured. Precision = how much of the detected time was
-          actually real. Break hit rate = how many real breaks got at least one matching detection.
+          Overnight hours are excluded. If the model was not scheduled to run, the dashboard shows "Not scheduled"
+          instead of treating that period as a miss.
         </p>
+
+        <ModelReadingGuide />
 
         <SqlMirrorStatusPanel
           status={sqlMirrorStatus}
@@ -892,7 +1032,7 @@ export default function ModelPerformanceDashboard() {
       <div className="insights-section">
         <h2>Overview</h2>
         <p className="model-performance-subtitle">
-          Short recent windows. Use this to see whether the model is healthy right now.
+          Short recent windows for the selected scope. These cards ignore hours when the model is intentionally off.
         </p>
         {loadingOverview ? (
           <div className="loading model-loading">Loading overview...</div>
@@ -932,7 +1072,8 @@ export default function ModelPerformanceDashboard() {
       <div className="insights-section">
         <h2>Trends</h2>
         <p className="model-performance-subtitle">
-          Longer history. Use this to see whether the model is drifting over time or only failing in short bursts.
+          Longer history across scheduled inference hours only. Use this to see whether performance is drifting over
+          time or only failing in short bursts.
         </p>
         {loadingTrends ? (
           <div className="loading model-loading">Loading trend charts...</div>
@@ -944,6 +1085,7 @@ export default function ModelPerformanceDashboard() {
               <MetricChartCard
                 key={chart.key}
                 title={chart.title}
+                description={chart.description}
                 data={trendChartData}
                 dataKey={chart.dataKey}
                 color={chart.color}
@@ -957,7 +1099,8 @@ export default function ModelPerformanceDashboard() {
       <div className="insights-section">
         <h2>Channel Breakdown</h2>
         <p className="model-performance-subtitle">
-          Per-channel ranking for the selected recent window. Click a channel row to inspect that channel in detail.
+          Side-by-side comparison of the live inference channels only. Recall means "how much real break time we
+          captured"; precision means "how much detected time was truly a break."
         </p>
         {loadingBreakdown ? (
           <div className="loading model-loading">Loading channels...</div>
@@ -969,11 +1112,11 @@ export default function ModelPerformanceDashboard() {
               <thead>
                 <tr>
                   <th>Channel</th>
-                  <th>Current Recall</th>
-                  <th>Current Precision</th>
-                  <th>7d Recall Avg</th>
-                  <th>30d Recall Avg</th>
-                  <th>Delta vs Baseline</th>
+                  <th>Captured Real Break Time (Recall)</th>
+                  <th>Detected Time That Was Real (Precision)</th>
+                  <th>Usual 7d Recall</th>
+                  <th>Usual 30d Recall</th>
+                  <th>Change vs 30d</th>
                   <th>Warnings</th>
                   <th>Sparkline</th>
                 </tr>
@@ -994,23 +1137,25 @@ export default function ModelPerformanceDashboard() {
                         Channel {row.channel}
                       </button>
                     </td>
-                    <td>{formatPercent(row.shortTerm.recallBySeconds)}</td>
-                    <td>{formatPercent(row.shortTerm.precisionBySeconds)}</td>
+                    <td>{formatPercentForWindow(row.shortTerm, row.shortTerm.recallBySeconds)}</td>
+                    <td>{formatPercentForWindow(row.shortTerm, row.shortTerm.precisionBySeconds)}</td>
                     <td>{formatPercent(row.baseline7d.metrics.recallBySeconds.average)}</td>
                     <td>{formatPercent(row.baseline30d.metrics.recallBySeconds.average)}</td>
                     <td>
                       <div className="channel-delta-cell">
                         <span className={metricDeltaClass(row.deltaVs30dRecall, 0)}>
-                          R {formatDeltaPercentPoints(row.deltaVs30dRecall)}
+                          Recall {formatDeltaForWindow(row.shortTerm, row.deltaVs30dRecall)}
                         </span>
                         <span className={metricDeltaClass(row.deltaVs30dPrecision, 0)}>
-                          P {formatDeltaPercentPoints(row.deltaVs30dPrecision)}
+                          Precision {formatDeltaForWindow(row.shortTerm, row.deltaVs30dPrecision)}
                         </span>
                       </div>
                     </td>
                     <td>
                       <div className="alert-chip-list compact">
-                        {row.warnings.length === 0 ? (
+                        {!isScheduledWindow(row.shortTerm) ? (
+                          <span className="alert-chip info">Outside schedule</span>
+                        ) : row.warnings.length === 0 ? (
                           <span className="alert-chip info">None</span>
                         ) : (
                           row.warnings.map((warning) => (
@@ -1037,7 +1182,8 @@ export default function ModelPerformanceDashboard() {
           <div>
             <h2>Detail Inspector</h2>
             <p className="model-performance-subtitle">
-              Inspect one day, a date range, or one recording to compare ground truth against the model interval by interval.
+              Inspect one day, a date range, or one recording to compare real breaks against model detections interval
+              by interval. Only scheduled inference hours are counted.
             </p>
           </div>
           <div className="leaderboard-controls">
@@ -1162,16 +1308,22 @@ export default function ModelPerformanceDashboard() {
 
             <div className="summary-cards">
               <div className="summary-card">
-                <div className="summary-label">Recall</div>
-                <div className="summary-value small">{formatPercent(channelDetail.summary.recallBySeconds)}</div>
+                <div className="summary-label">Captured Real Break Time (Recall)</div>
+                <div className="summary-value small">
+                  {formatPercentForWindow(channelDetail.summary, channelDetail.summary.recallBySeconds)}
+                </div>
               </div>
               <div className="summary-card">
-                <div className="summary-label">Precision</div>
-                <div className="summary-value small">{formatPercent(channelDetail.summary.precisionBySeconds)}</div>
+                <div className="summary-label">Detected Time That Was Real (Precision)</div>
+                <div className="summary-value small">
+                  {formatPercentForWindow(channelDetail.summary, channelDetail.summary.precisionBySeconds)}
+                </div>
               </div>
               <div className="summary-card">
-                <div className="summary-label">Break Hit Rate</div>
-                <div className="summary-value small">{formatPercent(channelDetail.summary.breakHitRate)}</div>
+                <div className="summary-label">Breaks Touched At Least Once</div>
+                <div className="summary-value small">
+                  {formatPercentForWindow(channelDetail.summary, channelDetail.summary.breakHitRate)}
+                </div>
               </div>
               <div className="summary-card">
                 <div className="summary-label">Matched Breaks</div>
@@ -1209,6 +1361,7 @@ export default function ModelPerformanceDashboard() {
             <div className="charts-grid">
               <div className="chart-item">
                 <h3>Hour of Day Performance</h3>
+                <p className="chart-description">Only the scheduled inference hours are shown here.</p>
                 <div className="ads-table-container">
                   <table className="ads-table compact-table">
                     <thead>
@@ -1220,7 +1373,7 @@ export default function ModelPerformanceDashboard() {
                       </tr>
                     </thead>
                     <tbody>
-                      {channelDetail.hourOfDay.map((row) => (
+                      {activeHourRows.map((row) => (
                         <tr key={row.label}>
                           <td>{row.label}</td>
                           <td>{formatPercent(row.recallBySeconds)}</td>
@@ -1235,6 +1388,7 @@ export default function ModelPerformanceDashboard() {
 
               <div className="chart-item">
                 <h3>Duration Bucket Performance</h3>
+                <p className="chart-description">Shows whether short or long breaks are easier for the model to catch.</p>
                 <div className="ads-table-container">
                   <table className="ads-table compact-table">
                     <thead>
@@ -1262,6 +1416,10 @@ export default function ModelPerformanceDashboard() {
 
             <div className="ads-section">
               <h2>Recording / File Breakdown</h2>
+              <p className="model-performance-subtitle">
+                Each row is one source recording file. This helps you see whether misses are concentrated in specific
+                recordings.
+              </p>
               <div className="ads-table-container">
                 <table className="ads-table compact-table">
                   <thead>
@@ -1294,6 +1452,9 @@ export default function ModelPerformanceDashboard() {
 
             <div className="ads-section">
               <h2>Per-Break Breakdown</h2>
+              <p className="model-performance-subtitle">
+                Each row is one real break. "Captured" shows how much of that break overlapped the model output.
+              </p>
               <div className="ads-table-container">
                 <table className="ads-table model-detail-table">
                   <thead>
