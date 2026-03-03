@@ -755,10 +755,10 @@ function deriveMirrorHealth(workerLagSeconds: number | null, workerEnabled: bool
   }
 
   const pollSeconds = sqlReplicationPollSeconds()
-  if (workerLagSeconds <= Math.max(pollSeconds * 2, 90)) {
+  if (workerLagSeconds <= Math.max(pollSeconds * 4, 180)) {
     return 'healthy'
   }
-  if (workerLagSeconds <= Math.max(pollSeconds * 8, 300)) {
+  if (workerLagSeconds <= Math.max(pollSeconds * 12, 600)) {
     return 'warning'
   }
   return 'critical'
