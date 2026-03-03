@@ -587,7 +587,12 @@ async function aggregateRange(params: {
   const { pool, startDay, endDay, timezone, channels } = params
   const dayList = listDays(startDay, endDay)
   const channelList = channels ?? (
-    await pool.query<{ channel: string }>('SELECT DISTINCT channel::text AS channel FROM comskip_ground_truth_recordings ORDER BY channel::int')
+    await pool.query<{ channel: string }>(`
+      SELECT channel::text AS channel
+      FROM comskip_ground_truth_recordings
+      GROUP BY channel
+      ORDER BY channel
+    `)
   ).rows.map((row) => row.channel)
 
   for (const day of dayList) {

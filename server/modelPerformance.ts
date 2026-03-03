@@ -141,6 +141,10 @@ function parseBoolean(value: unknown, defaultValue: boolean = false): boolean {
   return value === 'true' || value === '1'
 }
 
+function shouldUseAggregateTables(): boolean {
+  return parseBoolean(process.env.MODEL_PERFORMANCE_PREFER_AGGREGATES, false)
+}
+
 function getTimeZone(request: Request): string {
   const requestedTimeZone = typeof request.query.timezone === 'string' ? request.query.timezone : undefined
   return requestedTimeZone || process.env.MODEL_PERFORMANCE_TIMEZONE || DEFAULT_MODEL_PERFORMANCE_TIMEZONE
@@ -588,6 +592,10 @@ async function fetchAggregateMetricRows(
   rangeEndMs: number,
   channel: string,
 ): Promise<AggregateMetricRow[] | null> {
+  if (!shouldUseAggregateTables()) {
+    return null
+  }
+
   const tableName = AGGREGATE_TABLES[bucketKey]
   if (!(await tableExists(tableName))) {
     return null
@@ -632,6 +640,10 @@ async function fetchAggregateMetricRows(
     new Date(rangeEndMs).toISOString(),
     channelValue,
   ])
+
+  if (result.rows.length === 0) {
+    return null
+  }
 
   return result.rows.map((row) => mapAggregateRow(row as Record<string, unknown>))
 }
@@ -899,6 +911,76 @@ function filterMeaningfulBaselineSamples(points: TrendPoint[]): PerformanceMetri
     }))
 }
 
+function groupTruthIntervalsByChannel(truthIntervals: TruthInterval[]): Map<string, TruthInterval[]> {
+  const grouped = new Map<string, TruthInterval[]>()
+
+  for (const interval of truthIntervals) {
+    const channel = String(interval.metadata.channel)
+    const list = grouped.get(channel) ?? []
+    list.push(interval)
+    grouped.set(channel, list)
+  }
+
+  return grouped
+}
+
+function groupModelIntervalsByChannel(modelIntervals: ModelInterval[]): Map<string, ModelInterval[]> {
+  const grouped = new Map<string, ModelInterval[]>()
+
+  for (const interval of modelIntervals) {
+    const channel = String(interval.metadata.channel)
+    const list = grouped.get(channel) ?? []
+    list.push(interval)
+    grouped.set(channel, list)
+  }
+
+  return grouped
+}
+
+async function buildRawTrendPointsByChannel(params: {
+  docClient: DynamoDBDocumentClient
+  dataLabelsTable: string
+  rangeStartMs: number
+  rangeEndMs: number
+  bucketKey: TrendBucketKey
+  timeZone: string
+}): Promise<Map<string, TrendPoint[]>> {
+  const rawWindow = await loadWindowData({
+    docClient: params.docClient,
+    dataLabelsTable: params.dataLabelsTable,
+    channel: 'all',
+    windowStartMs: params.rangeStartMs,
+    windowEndMs: params.rangeEndMs,
+    timeZone: params.timeZone,
+  })
+  const truthByChannel = groupTruthIntervalsByChannel(rawWindow.truthIntervals)
+  const modelByChannel = groupModelIntervalsByChannel(rawWindow.modelIntervals)
+  const channels = new Set<string>([
+    ...truthByChannel.keys(),
+    ...modelByChannel.keys(),
+  ])
+  const pointsByChannel = new Map<string, TrendPoint[]>()
+
+  for (const channel of channels) {
+    const truthIntervals = truthByChannel.get(channel) ?? []
+    const modelIntervals = modelByChannel.get(channel) ?? []
+    const breakComparisons = buildBreakComparisons(truthIntervals, modelIntervals)
+    const points = buildTrendPoints({
+      truthIntervals,
+      modelIntervals,
+      breakComparisons,
+      rangeStartMs: params.rangeStartMs,
+      rangeEndMs: params.rangeEndMs,
+      bucketKey: params.bucketKey,
+      timeZone: params.timeZone,
+    })
+
+    pointsByChannel.set(channel, points)
+  }
+
+  return pointsByChannel
+}
+
 async function getBaselineSamples(params: {
   docClient: DynamoDBDocumentClient
   dataLabelsTable: string
@@ -1064,18 +1146,8 @@ async function getChannelBreakdown(params: {
     timeZone: params.timeZone,
   })
 
-  const truthByChannel = new Map<string, TruthInterval[]>()
-  const modelByChannel = new Map<string, ModelInterval[]>()
-  for (const truthInterval of currentWindow.truthIntervals) {
-    const list = truthByChannel.get(String(truthInterval.metadata.channel)) ?? []
-    list.push(truthInterval)
-    truthByChannel.set(String(truthInterval.metadata.channel), list)
-  }
-  for (const modelInterval of currentWindow.modelIntervals) {
-    const list = modelByChannel.get(String(modelInterval.metadata.channel)) ?? []
-    list.push(modelInterval)
-    modelByChannel.set(String(modelInterval.metadata.channel), list)
-  }
+  const truthByChannel = groupTruthIntervalsByChannel(currentWindow.truthIntervals)
+  const modelByChannel = groupModelIntervalsByChannel(currentWindow.modelIntervals)
 
   const sparklineRows = await fetchAggregateMetricRows('1h', now - 24 * 60 * 60 * 1000, now, 'all')
   const sparklineByChannel = new Map<string, AggregateMetricRow[]>()
@@ -1086,6 +1158,16 @@ async function getChannelBreakdown(params: {
       sparklineByChannel.set(row.channel, list)
     }
   }
+  const sparklineFallbackByChannel = sparklineRows
+    ? null
+    : await buildRawTrendPointsByChannel({
+        docClient: params.docClient,
+        dataLabelsTable: params.dataLabelsTable,
+        rangeStartMs: now - 24 * 60 * 60 * 1000,
+        rangeEndMs: now,
+        bucketKey: '1h',
+        timeZone: params.timeZone,
+      })
 
   const baseline7Rows = await fetchAggregateMetricRows(
     WINDOW_TO_BUCKET[params.shortTermWindowKey],
@@ -1093,12 +1175,32 @@ async function getChannelBreakdown(params: {
     currentWindowStartMs,
     'all',
   )
+  const baseline7FallbackByChannel = baseline7Rows
+    ? null
+    : await buildRawTrendPointsByChannel({
+        docClient: params.docClient,
+        dataLabelsTable: params.dataLabelsTable,
+        rangeStartMs: currentWindowStartMs - 7 * 24 * 60 * 60 * 1000,
+        rangeEndMs: currentWindowStartMs,
+        bucketKey: WINDOW_TO_BUCKET[params.shortTermWindowKey],
+        timeZone: params.timeZone,
+      })
   const baseline30Rows = await fetchAggregateMetricRows(
     WINDOW_TO_BUCKET[params.shortTermWindowKey],
     currentWindowStartMs - 30 * 24 * 60 * 60 * 1000,
     currentWindowStartMs,
     'all',
   )
+  const baseline30FallbackByChannel = baseline30Rows
+    ? null
+    : await buildRawTrendPointsByChannel({
+        docClient: params.docClient,
+        dataLabelsTable: params.dataLabelsTable,
+        rangeStartMs: currentWindowStartMs - 30 * 24 * 60 * 60 * 1000,
+        rangeEndMs: currentWindowStartMs,
+        bucketKey: WINDOW_TO_BUCKET[params.shortTermWindowKey],
+        timeZone: params.timeZone,
+      })
 
   const baseline7ByChannel = new Map<string, PerformanceMetrics[]>()
   const baseline30ByChannel = new Map<string, PerformanceMetrics[]>()
@@ -1112,6 +1214,16 @@ async function getChannelBreakdown(params: {
     const list = baseline30ByChannel.get(row.channel) ?? []
     list.push(row.metrics)
     baseline30ByChannel.set(row.channel, list)
+  }
+  if (baseline7FallbackByChannel) {
+    for (const [channel, points] of baseline7FallbackByChannel.entries()) {
+      baseline7ByChannel.set(channel, filterMeaningfulBaselineSamples(points))
+    }
+  }
+  if (baseline30FallbackByChannel) {
+    for (const [channel, points] of baseline30FallbackByChannel.entries()) {
+      baseline30ByChannel.set(channel, filterMeaningfulBaselineSamples(points))
+    }
   }
 
   const rows: ChannelBreakdownRow[] = channels.map((channel) => {
@@ -1152,14 +1264,21 @@ async function getChannelBreakdown(params: {
           ? null
           : shortTerm.precisionBySeconds - baseline30d.metrics.precisionBySeconds.average,
       warnings,
-      sparkline: (sparklineByChannel.get(channel) ?? [])
-        .sort((left, right) => left.bucketStartMs - right.bucketStartMs)
-        .map((row) => ({
-          bucketStart: toIsoString(row.bucketStartMs),
-          recallBySeconds: row.metrics.recallBySeconds,
-          precisionBySeconds: row.metrics.precisionBySeconds,
-          breakHitRate: row.metrics.breakHitRate,
-        })),
+      sparkline: sparklineFallbackByChannel
+        ? (sparklineFallbackByChannel.get(channel) ?? []).map((point) => ({
+            bucketStart: point.bucketStart,
+            recallBySeconds: point.recallBySeconds,
+            precisionBySeconds: point.precisionBySeconds,
+            breakHitRate: point.breakHitRate,
+          }))
+        : (sparklineByChannel.get(channel) ?? [])
+            .sort((left, right) => left.bucketStartMs - right.bucketStartMs)
+            .map((row) => ({
+              bucketStart: toIsoString(row.bucketStartMs),
+              recallBySeconds: row.metrics.recallBySeconds,
+              precisionBySeconds: row.metrics.precisionBySeconds,
+              breakHitRate: row.metrics.breakHitRate,
+            })),
     }
   })
 

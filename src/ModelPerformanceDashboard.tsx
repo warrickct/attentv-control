@@ -612,7 +612,7 @@ export default function ModelPerformanceDashboard() {
           <div>
             <h2>Model Performance</h2>
             <p className="model-performance-subtitle">
-              Compares model detections against comskip ground truth using server-side SQL and normalized interval data.
+              Shows how much of the real ad-break time the model actually captured, using mirrored SQL data.
             </p>
           </div>
           <div className="refresh-controls">
@@ -718,6 +718,11 @@ export default function ModelPerformanceDashboard() {
             <span>Server-only access</span>
           </div>
         </div>
+
+        <p className="model-performance-subtitle">
+          Recall = how much of the real ad-break time the model captured. Precision = how much of the detected time was
+          actually real. Break hit rate = how many real breaks got at least one matching detection.
+        </p>
       </div>
 
       {error && (
@@ -728,6 +733,9 @@ export default function ModelPerformanceDashboard() {
 
       <div className="insights-section">
         <h2>Overview</h2>
+        <p className="model-performance-subtitle">
+          Short recent windows. Use this to see whether the model is healthy right now.
+        </p>
         {loadingOverview ? (
           <div className="loading model-loading">Loading overview...</div>
         ) : !overview ? (
@@ -765,6 +773,9 @@ export default function ModelPerformanceDashboard() {
 
       <div className="insights-section">
         <h2>Trends</h2>
+        <p className="model-performance-subtitle">
+          Longer history. Use this to see whether the model is drifting over time or only failing in short bursts.
+        </p>
         {loadingTrends ? (
           <div className="loading model-loading">Loading trend charts...</div>
         ) : !trends ? (
@@ -787,6 +798,9 @@ export default function ModelPerformanceDashboard() {
 
       <div className="insights-section">
         <h2>Channel Breakdown</h2>
+        <p className="model-performance-subtitle">
+          Per-channel ranking for the selected recent window. Click a channel row to inspect that channel in detail.
+        </p>
         {loadingBreakdown ? (
           <div className="loading model-loading">Loading channels...</div>
         ) : !channelBreakdown || channelBreakdown.channels.length === 0 ? (
@@ -865,7 +879,7 @@ export default function ModelPerformanceDashboard() {
           <div>
             <h2>Detail Inspector</h2>
             <p className="model-performance-subtitle">
-              Inspect day-level, multi-day, or recording-specific overlap using the same comparison logic as the backend job.
+              Inspect one day, a date range, or one recording to compare ground truth against the model interval by interval.
             </p>
           </div>
           <div className="leaderboard-controls">

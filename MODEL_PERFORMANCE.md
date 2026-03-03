@@ -22,8 +22,8 @@ All browser reads go through backend endpoints in `server/modelPerformance.ts`.
    - `model_performance_hourly`
    - `model_performance_daily`
 5. UI read path:
-   - prefer aggregate SQL tables for long-range queries
-   - fall back to raw truth + normalized/raw model interval comparison when aggregates are unavailable
+   - prefer raw SQL `model_detection_events` plus truth tables by default
+   - optionally use aggregate SQL tables only when `MODEL_PERFORMANCE_PREFER_AGGREGATES=true`
 
 ## Credentials
 
@@ -110,7 +110,21 @@ Alerts only fire when the sample size is meaningful:
 - at least `30` ground-truth seconds, or
 - at least `2` ground-truth breaks
 
-## Backfill And Refresh
+## Mirroring And Refresh
+
+The live Railway backend now runs a continuous SQL mirror worker.
+
+- `data_labels` is replicated into `model_detection_events` using incremental DynamoDB `Query` calls by `channel + startTime`
+- the worker also replays the recent Sydney-day window so late arrivals are corrected automatically
+- the dashboard reads the mirrored SQL data directly, so it no longer depends on scheduled batch refreshes for normal freshness
+
+For one-off repair/bootstrap:
+
+```bash
+npm run sql-mirror:sync
+```
+
+Legacy schema and backfill path:
 
 1. Apply the schema:
 
@@ -124,17 +138,13 @@ psql "$DATABASE_URL" -f sql_cloud/model_performance_schema.sql
 npm run model-performance:backfill -- --mode all --start 2025-10-01 --end 2025-10-31
 ```
 
-3. Schedule recurring jobs:
-
-- every `1-5m`: `npm run model-performance:backfill -- --mode sync --start <today> --end <today>`
-- hourly: `npm run model-performance:backfill -- --mode aggregate --start <today> --end <today>`
-- daily backfill: rerun the aggregate job for the previous 1-3 days
-
-The backfill script lives at `scripts/backfill-model-performance.ts`. It:
+3. The backfill script lives at `scripts/backfill-model-performance.ts`. It:
 
 - applies `sql_cloud/model_performance_schema.sql`
 - syncs `data_labels` into `model_detection_events`
 - recomputes `15m`, `hourly`, and `daily` rollups per channel and day
+
+Use that script for historical rebuilds or rollup repair, not as the primary live-refresh path.
 
 ## Testing
 

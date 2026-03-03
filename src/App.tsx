@@ -11,7 +11,14 @@ import DeviceComparisonChart from './DeviceComparisonChart'
 import ScreenshotGallery from './ScreenshotGallery'
 import DataLabelsGraph from './DataLabelsGraph'
 import ModelPerformanceDashboard from './ModelPerformanceDashboard'
+import QuickQuestionPopup from './QuickQuestionPopup'
 import { API_URL, apiFetch } from './api'
+import {
+  buildQuickQuestionStorageKey,
+  shouldShowQuickQuestion,
+  type QuickQuestionConfigResponse,
+  type QuickQuestionInteraction,
+} from '../shared/quickQuestion'
 
 interface DeviceSummary {
   deviceId: string
@@ -36,6 +43,35 @@ interface AuthUser {
 
 type ViewMode = 'screenshots' | 'overview' | 'device' | 'dataLabels' | 'modelPerformance'
 
+function readQuickQuestionInteraction(username: string): QuickQuestionInteraction | null {
+  if (typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(buildQuickQuestionStorageKey(username))
+    if (!rawValue) {
+      return null
+    }
+
+    const parsed = JSON.parse(rawValue) as QuickQuestionInteraction
+    return parsed && typeof parsed.questionId === 'string' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeQuickQuestionInteraction(username: string, interaction: QuickQuestionInteraction): void {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  window.localStorage.setItem(
+    buildQuickQuestionStorageKey(username),
+    JSON.stringify(interaction),
+  )
+}
+
 function App() {
   const [devices, setDevices] = useState<string[]>([])
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null)
@@ -51,6 +87,10 @@ function App() {
   const [loginPassword, setLoginPassword] = useState('')
   const [loginLoading, setLoginLoading] = useState(false)
   const [loginError, setLoginError] = useState<string | null>(null)
+  const [quickQuestionConfig, setQuickQuestionConfig] = useState<QuickQuestionConfigResponse | null>(null)
+  const [quickQuestionVisible, setQuickQuestionVisible] = useState(false)
+  const [quickQuestionSubmitting, setQuickQuestionSubmitting] = useState(false)
+  const [quickQuestionError, setQuickQuestionError] = useState<string | null>(null)
 
   // Fetch device list from S3
   const fetchDevices = useCallback(async () => {
@@ -169,6 +209,76 @@ function App() {
     }
   }, [fetchDevices, user])
 
+  useEffect(() => {
+    if (!user) {
+      setQuickQuestionConfig(null)
+      setQuickQuestionVisible(false)
+      setQuickQuestionError(null)
+      setQuickQuestionSubmitting(false)
+      return
+    }
+
+    let cancelled = false
+    let showTimer: number | null = null
+
+    const fetchQuickQuestion = async () => {
+      try {
+        const response = await apiFetch(`${API_URL}/api/quick-question`)
+        if (!response.ok) {
+          throw new Error('Failed to fetch quick question')
+        }
+
+        const data = await response.json() as QuickQuestionConfigResponse
+        if (cancelled) {
+          return
+        }
+
+        setQuickQuestionConfig(data)
+        setQuickQuestionError(null)
+
+        if (!data.enabled || !data.question) {
+          setQuickQuestionVisible(false)
+          return
+        }
+
+        const lastInteraction = readQuickQuestionInteraction(user.username)
+        const canShow = shouldShowQuickQuestion({
+          enabled: data.enabled,
+          questionId: data.question.id,
+          frequencyDays: data.frequencyDays,
+          lastInteraction,
+          nowMs: Date.now(),
+        })
+
+        if (!canShow) {
+          setQuickQuestionVisible(false)
+          return
+        }
+
+        showTimer = window.setTimeout(() => {
+          if (!cancelled) {
+            setQuickQuestionVisible(true)
+          }
+        }, 1200)
+      } catch (err: any) {
+        console.error('Error fetching quick question:', err)
+        if (!cancelled) {
+          setQuickQuestionVisible(false)
+          setQuickQuestionConfig(null)
+        }
+      }
+    }
+
+    fetchQuickQuestion()
+
+    return () => {
+      cancelled = true
+      if (showTimer !== null) {
+        window.clearTimeout(showTimer)
+      }
+    }
+  }, [user])
+
   // Fetch data when device is selected
   useEffect(() => {
     if (user && selectedDevice && viewMode === 'device') {
@@ -219,8 +329,64 @@ function App() {
       setDeviceSummaries({})
       setAdAggregations({})
       setLoadingDevices(false)
+      setQuickQuestionConfig(null)
+      setQuickQuestionVisible(false)
+      setQuickQuestionError(null)
+      setQuickQuestionSubmitting(false)
     }
   }, [])
+
+  const handleQuickQuestionDismiss = useCallback(() => {
+    if (user && quickQuestionConfig?.question) {
+      writeQuickQuestionInteraction(user.username, {
+        questionId: quickQuestionConfig.question.id,
+        interactedAt: new Date().toISOString(),
+        action: 'dismissed',
+      })
+    }
+
+    setQuickQuestionVisible(false)
+    setQuickQuestionError(null)
+  }, [quickQuestionConfig, user])
+
+  const handleQuickQuestionAnswer = useCallback(async (optionId: string) => {
+    if (!user || !quickQuestionConfig?.question) {
+      return
+    }
+
+    try {
+      setQuickQuestionSubmitting(true)
+      setQuickQuestionError(null)
+
+      const response = await apiFetch(`${API_URL}/api/quick-question/respond`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          questionId: quickQuestionConfig.question.id,
+          optionId,
+        }),
+      })
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to save quick question response')
+      }
+
+      writeQuickQuestionInteraction(user.username, {
+        questionId: quickQuestionConfig.question.id,
+        interactedAt: new Date().toISOString(),
+        action: 'answered',
+        optionId,
+      })
+      setQuickQuestionVisible(false)
+    } catch (err: any) {
+      setQuickQuestionError(err.message || 'Failed to save quick question response')
+    } finally {
+      setQuickQuestionSubmitting(false)
+    }
+  }, [quickQuestionConfig, user])
 
   const formatDuration = (seconds: number | undefined) => {
     if (seconds === undefined || seconds === 0) return '0s'
@@ -323,6 +489,16 @@ function App() {
 
   return (
     <div className="app">
+      {quickQuestionVisible && quickQuestionConfig?.question && (
+        <QuickQuestionPopup
+          question={quickQuestionConfig.question}
+          loading={quickQuestionSubmitting}
+          error={quickQuestionError}
+          onAnswer={handleQuickQuestionAnswer}
+          onDismiss={handleQuickQuestionDismiss}
+        />
+      )}
+
       <header className="header">
         <h1>Ad Play Statistics Dashboard</h1>
         <p>Monitor ad play data by device from AWS DynamoDB</p>
