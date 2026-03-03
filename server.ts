@@ -25,7 +25,7 @@ import {
   getHourlyPatterns,
   getWeekComparison,
 } from './server/adPlayAnalytics'
-import { startSqlMirrorSyncService } from './server/sqlMirror'
+import { getSqlMirrorStatus, startSqlMirrorSyncService } from './server/sqlMirror'
 
 function resolveRuntimeDirname(): string {
   if (typeof __dirname !== 'undefined') {
@@ -114,6 +114,7 @@ const deviceSummaryCache = new Map<string, CacheEntry<any>>()
 const deviceAdsCache = new Map<string, CacheEntry<any>>()
 const aggregateCache = new Map<string, CacheEntry<any>>()
 const dataLabelsChannelsCache = new Map<string, CacheEntry<string[]>>()
+const sqlMirrorStatusCache = new Map<string, CacheEntry<any>>()
 const AD_PLAYS_TABLE = process.env.AD_PLAYS_TABLE || 'attentv-ad-plays-prod'
 
 // Helper to get cached data or null if expired
@@ -159,6 +160,30 @@ registerModelPerformanceRoutes({
   app,
   docClient,
   dataLabelsTable: DATA_LABELS_TABLE,
+})
+
+app.get('/api/sql-mirror/status', async (req, res) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true'
+    const cacheKey = 'sql-mirror-status'
+
+    if (!forceRefresh) {
+      const cached = getCached(sqlMirrorStatusCache, cacheKey, 30000)
+      if (cached) {
+        return res.json(cached)
+      }
+    }
+
+    const response = await getSqlMirrorStatus()
+    setCached(sqlMirrorStatusCache, cacheKey, response)
+    res.json(response)
+  } catch (error: any) {
+    console.error('Error fetching SQL mirror status:', error)
+    res.status(500).json({
+      error: error.message || 'Failed to fetch SQL mirror status',
+      code: error.name,
+    })
+  }
 })
 
 registerQuickQuestionRoutes({

@@ -10,6 +10,7 @@ import {
   getTimeZoneDateParts,
   parseTimestampInTimeZone,
 } from '../shared/timezone'
+import type { SqlMirrorHealth, SqlMirrorSourceStatus, SqlMirrorStatusResponse } from '../shared/sqlMirror'
 
 interface SqlMirrorSyncOptions {
   docClient: DynamoDBDocumentClient
@@ -94,6 +95,10 @@ function adPlayRecentReplayHours(): number {
   return Number.parseInt(process.env.AD_PLAY_SQL_RECENT_REPLAY_HOURS || '48', 10)
 }
 
+function sqlReplicationPollSeconds(): number {
+  return Math.max(1, Math.round(sqlReplicationPollMs() / 1000))
+}
+
 function toDateKey(date: Date, timeZone: string): string {
   const parts = getTimeZoneDateParts(date, timeZone)
   return `${parts.year.toString().padStart(4, '0')}-${parts.month.toString().padStart(2, '0')}-${parts.day
@@ -152,6 +157,11 @@ async function ensureSchemas(pool: Pool): Promise<void> {
   }
 
   schemasEnsured = true
+}
+
+async function sqlTableExists(pool: Pool, tableName: string): Promise<boolean> {
+  const result = await pool.query<{ present: string | null }>('SELECT to_regclass($1) AS present', [tableName])
+  return Boolean(result.rows[0]?.present)
 }
 
 function resolveStateTable(tableName: 'model' | 'adPlay'): string {
@@ -732,6 +742,130 @@ async function syncAdPlays(params: {
       lastCycleAt: new Date().toISOString(),
       insertedRows,
     })
+  }
+}
+
+function deriveMirrorHealth(workerLagSeconds: number | null, workerEnabled: boolean): SqlMirrorHealth {
+  if (!workerEnabled) {
+    return 'warning'
+  }
+
+  if (workerLagSeconds === null) {
+    return 'unknown'
+  }
+
+  const pollSeconds = sqlReplicationPollSeconds()
+  if (workerLagSeconds <= Math.max(pollSeconds * 2, 90)) {
+    return 'healthy'
+  }
+  if (workerLagSeconds <= Math.max(pollSeconds * 8, 300)) {
+    return 'warning'
+  }
+  return 'critical'
+}
+
+async function fetchSourceStatus(pool: Pool, params: {
+  key: SqlMirrorSourceStatus['key']
+  label: string
+  mirrorTable: string
+  latestTimestampColumn: string
+  orderByColumn: string
+  refreshStateTable: 'model' | 'adPlay'
+  jobNamePattern: string
+  partitionLabel: string
+  note: string
+}): Promise<SqlMirrorSourceStatus> {
+  const workerEnabled = sqlReplicationEnabled()
+  const stateTable = resolveStateTable(params.refreshStateTable)
+  const now = Date.now()
+
+  const [mirrorTablePresent, stateTablePresent] = await Promise.all([
+    sqlTableExists(pool, params.mirrorTable),
+    sqlTableExists(pool, stateTable),
+  ])
+
+  let workerLastSyncAt: string | null = null
+  let partitionCount = 0
+
+  if (stateTablePresent) {
+    const refreshResult = await pool.query<{ worker_last_sync_at: string | null; partition_count: string }>(`
+      SELECT
+        MAX(last_synced_at) AS worker_last_sync_at,
+        COUNT(*)::bigint AS partition_count
+      FROM ${stateTable}
+      WHERE job_name LIKE $1
+    `, [params.jobNamePattern])
+
+    workerLastSyncAt = refreshResult.rows[0]?.worker_last_sync_at ?? null
+    partitionCount = Number.parseInt(refreshResult.rows[0]?.partition_count ?? '0', 10)
+  }
+
+  let latestMirroredAt: string | null = null
+  if (mirrorTablePresent) {
+    const latestResult = await pool.query<{ latest_mirrored_at: string | null }>(`
+      SELECT ${params.latestTimestampColumn} AS latest_mirrored_at
+      FROM ${params.mirrorTable}
+      ORDER BY ${params.orderByColumn} DESC
+      LIMIT 1
+    `)
+
+    latestMirroredAt = latestResult.rows[0]?.latest_mirrored_at ?? null
+  }
+
+  const workerLagSeconds =
+    workerLastSyncAt ? Math.max(0, Math.round((now - new Date(workerLastSyncAt).getTime()) / 1000)) : null
+  const dataLagSeconds =
+    latestMirroredAt ? Math.max(0, Math.round((now - new Date(latestMirroredAt).getTime()) / 1000)) : null
+
+  return {
+    key: params.key,
+    label: params.label,
+    mirrorTable: params.mirrorTable,
+    partitionLabel: params.partitionLabel,
+    partitionCount,
+    workerLastSyncAt,
+    workerLagSeconds,
+    latestMirroredAt,
+    dataLagSeconds,
+    status: deriveMirrorHealth(workerLagSeconds, workerEnabled),
+    note: params.note,
+  }
+}
+
+export async function getSqlMirrorStatus(): Promise<SqlMirrorStatusResponse> {
+  const pool = await getPostgresPool()
+  await ensureSchemas(pool)
+
+  const sources = await Promise.all([
+    fetchSourceStatus(pool, {
+      key: 'model-detections',
+      label: 'Model Detections',
+      mirrorTable: 'model_detection_events',
+      latestTimestampColumn: 'ended_at',
+      orderByColumn: 'started_at',
+      refreshStateTable: 'model',
+      jobNamePattern: 'replicate-data-labels:%',
+      partitionLabel: 'channels',
+      note: 'Worker freshness is based on mirror cycles. Data age can grow during quiet inference periods.',
+    }),
+    fetchSourceStatus(pool, {
+      key: 'ad-plays',
+      label: 'Ad Plays',
+      mirrorTable: 'ad_play_events',
+      latestTimestampColumn: 'played_at',
+      orderByColumn: 'played_at',
+      refreshStateTable: 'adPlay',
+      jobNamePattern: 'replicate-ad-play-events:%',
+      partitionLabel: 'devices',
+      note: 'This covers the query-heavy ad-play history used by the dashboard.',
+    }),
+  ])
+
+  return {
+    generatedAt: new Date().toISOString(),
+    workerEnabled: sqlReplicationEnabled(),
+    pollIntervalSeconds: sqlReplicationPollSeconds(),
+    sources,
   }
 }
 

@@ -1143,6 +1143,89 @@
   margin-top: 0.5rem;
 }
 
+.sql-mirror-panel {
+  margin-top: 1.25rem;
+  padding: 1.25rem;
+  background: #f8f9fa;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+}
+
+.sql-mirror-panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.sql-mirror-panel-header h3 {
+  color: #333;
+  margin-bottom: 0.25rem;
+}
+
+.sql-mirror-panel-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.35rem;
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.sql-mirror-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.sql-mirror-card {
+  background: white;
+  border: 1px solid #eceff1;
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.sql-mirror-card-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.sql-mirror-card-header h4 {
+  color: #333;
+  margin-bottom: 0.2rem;
+}
+
+.sql-mirror-card-header p {
+  color: #666;
+  font-size: 0.9rem;
+}
+
+.sql-mirror-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.85rem;
+}
+
+.sql-mirror-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.sql-mirror-metric strong {
+  color: #333;
+}
+
+.sql-mirror-note {
+  margin-top: 0.9rem;
+  color: #666;
+  font-size: 0.9rem;
+}
+
 .model-loading {
   color: #333;
 }
@@ -1220,6 +1303,11 @@
 .alert-chip.info {
   background: #e3f2fd;
   color: #1565c0;
+}
+
+.alert-chip.healthy {
+  background: #e8f5e9;
+  color: #2e7d32;
 }
 
 .alert-chip.warning {
@@ -1624,6 +1712,14 @@
 
   .model-detail-scope-card {
     flex-direction: column;
+  }
+
+  .sql-mirror-panel-header {
+    flex-direction: column;
+  }
+
+  .sql-mirror-panel-meta {
+    align-items: flex-start;
   }
 
   .timeline-axis {

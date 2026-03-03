@@ -29,6 +29,7 @@ import {
   DEFAULT_MODEL_PERFORMANCE_TIMEZONE,
   getTimeZoneDateParts,
 } from '../shared/timezone'
+import type { SqlMirrorHealth, SqlMirrorStatusResponse } from '../shared/sqlMirror'
 import { API_URL, apiFetch } from './api'
 
 const TREND_CHARTS: Array<{
@@ -86,6 +87,24 @@ function formatSeconds(value: number | null | undefined): string {
   return `${value.toFixed(1)}s`
 }
 
+function formatAge(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return 'N/A'
+  }
+
+  const absolute = Math.abs(value)
+  if (absolute >= 24 * 60 * 60) {
+    return `${(value / (24 * 60 * 60)).toFixed(1)}d`
+  }
+  if (absolute >= 60 * 60) {
+    return `${(value / (60 * 60)).toFixed(1)}h`
+  }
+  if (absolute >= 60) {
+    return `${(value / 60).toFixed(1)}m`
+  }
+  return `${value.toFixed(0)}s`
+}
+
 function formatDateTime(value: string | number | null | undefined, timeZone: string): string {
   if (!value) {
     return 'N/A'
@@ -115,6 +134,32 @@ function formatTimeOnly(value: string | number | null | undefined, timeZone: str
 
 function severityClass(severity: PerformanceAlert['severity']): string {
   return `alert-chip ${severity}`
+}
+
+function mirrorHealthClass(status: SqlMirrorHealth): string {
+  if (status === 'healthy') {
+    return 'alert-chip healthy'
+  }
+  if (status === 'warning') {
+    return 'alert-chip warning'
+  }
+  if (status === 'critical') {
+    return 'alert-chip critical'
+  }
+  return 'alert-chip info'
+}
+
+function mirrorHealthLabel(status: SqlMirrorHealth): string {
+  if (status === 'healthy') {
+    return 'Healthy'
+  }
+  if (status === 'warning') {
+    return 'Delayed'
+  }
+  if (status === 'critical') {
+    return 'Stale'
+  }
+  return 'Unknown'
 }
 
 function metricDeltaClass(current: number | null | undefined, baseline: number | null | undefined): string {
@@ -343,6 +388,84 @@ function OverviewWindowCard({
   )
 }
 
+function SqlMirrorStatusPanel({
+  status,
+  loading,
+  error,
+  timeZone,
+}: {
+  status: SqlMirrorStatusResponse | null
+  loading: boolean
+  error: string | null
+  timeZone: string
+}) {
+  return (
+    <div className="sql-mirror-panel">
+      <div className="sql-mirror-panel-header">
+        <div>
+          <h3>SQL Mirror Status</h3>
+          <p className="model-performance-subtitle">
+            Worker lag = time since the mirror last ran. Data lag = age of the newest mirrored row.
+          </p>
+        </div>
+        {status && (
+          <div className="sql-mirror-panel-meta">
+            <span>Poll every {status.pollIntervalSeconds}s</span>
+            <span>{status.workerEnabled ? 'Worker enabled' : 'Worker disabled'}</span>
+          </div>
+        )}
+      </div>
+
+      {loading ? (
+        <div className="loading model-loading">Loading SQL mirror status...</div>
+      ) : error ? (
+        <div className="empty-state">{error}</div>
+      ) : !status ? (
+        <div className="empty-state">No SQL mirror status available.</div>
+      ) : (
+        <div className="sql-mirror-grid">
+          {status.sources.map((source) => (
+            <div key={source.key} className="sql-mirror-card">
+              <div className="sql-mirror-card-header">
+                <div>
+                  <h4>{source.label}</h4>
+                  <p>{source.mirrorTable}</p>
+                </div>
+                <span className={mirrorHealthClass(source.status)}>{mirrorHealthLabel(source.status)}</span>
+              </div>
+
+              <div className="sql-mirror-metrics-grid">
+                <div className="sql-mirror-metric">
+                  <span className="summary-label">Last Worker Sync</span>
+                  <strong>{formatDateTime(source.workerLastSyncAt, timeZone)}</strong>
+                </div>
+                <div className="sql-mirror-metric">
+                  <span className="summary-label">Worker Lag</span>
+                  <strong>{formatAge(source.workerLagSeconds)}</strong>
+                </div>
+                <div className="sql-mirror-metric">
+                  <span className="summary-label">Latest Mirrored Row</span>
+                  <strong>{formatDateTime(source.latestMirroredAt, timeZone)}</strong>
+                </div>
+                <div className="sql-mirror-metric">
+                  <span className="summary-label">Data Lag</span>
+                  <strong>{formatAge(source.dataLagSeconds)}</strong>
+                </div>
+                <div className="sql-mirror-metric">
+                  <span className="summary-label">Tracked {source.partitionLabel}</span>
+                  <strong>{source.partitionCount}</strong>
+                </div>
+              </div>
+
+              <p className="sql-mirror-note">{source.note}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ModelPerformanceDashboard() {
   const [channels, setChannels] = useState<string[]>([])
   const [timezone, setTimezone] = useState<string>(DEFAULT_MODEL_PERFORMANCE_TIMEZONE)
@@ -363,12 +486,15 @@ export default function ModelPerformanceDashboard() {
   const [trends, setTrends] = useState<TrendsResponse | null>(null)
   const [channelBreakdown, setChannelBreakdown] = useState<ChannelBreakdownResponse | null>(null)
   const [channelDetail, setChannelDetail] = useState<ChannelDetailResponse | null>(null)
+  const [sqlMirrorStatus, setSqlMirrorStatus] = useState<SqlMirrorStatusResponse | null>(null)
   const [loadingFilters, setLoadingFilters] = useState<boolean>(true)
+  const [loadingSqlMirrorStatus, setLoadingSqlMirrorStatus] = useState<boolean>(true)
   const [loadingOverview, setLoadingOverview] = useState<boolean>(true)
   const [loadingTrends, setLoadingTrends] = useState<boolean>(true)
   const [loadingBreakdown, setLoadingBreakdown] = useState<boolean>(true)
   const [loadingDetail, setLoadingDetail] = useState<boolean>(false)
   const [error, setError] = useState<string | null>(null)
+  const [sqlMirrorError, setSqlMirrorError] = useState<string | null>(null)
   const [refreshIndex, setRefreshIndex] = useState<number>(0)
 
   useEffect(() => {
@@ -413,6 +539,31 @@ export default function ModelPerformanceDashboard() {
       setDetailEndDate(getTodayInTimeZone(timezone))
     }
   }, [detailDay, detailEndDate, detailStartDate, timezone])
+
+  useEffect(() => {
+    const fetchSqlMirrorStatus = async () => {
+      try {
+        setLoadingSqlMirrorStatus(true)
+        setSqlMirrorError(null)
+        const params = new URLSearchParams({
+          refresh: refreshIndex > 0 ? 'true' : 'false',
+        })
+        const response = await apiFetch(`${API_URL}/api/sql-mirror/status?${params.toString()}`)
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null)
+          throw new Error(payload?.error || 'Failed to fetch SQL mirror status')
+        }
+        const data = await response.json()
+        setSqlMirrorStatus(data)
+      } catch (err: any) {
+        setSqlMirrorError(err.message || 'Failed to fetch SQL mirror status')
+      } finally {
+        setLoadingSqlMirrorStatus(false)
+      }
+    }
+
+    fetchSqlMirrorStatus()
+  }, [refreshIndex])
 
   useEffect(() => {
     const fetchOverview = async () => {
@@ -723,6 +874,13 @@ export default function ModelPerformanceDashboard() {
           Recall = how much of the real ad-break time the model captured. Precision = how much of the detected time was
           actually real. Break hit rate = how many real breaks got at least one matching detection.
         </p>
+
+        <SqlMirrorStatusPanel
+          status={sqlMirrorStatus}
+          loading={loadingSqlMirrorStatus}
+          error={sqlMirrorError}
+          timeZone={timezone}
+        />
       </div>
 
       {error && (
